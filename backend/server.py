@@ -50,11 +50,16 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() != "false"
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 Mo, largement suffisant pour ces routes
 
-# Railway termine les connexions via son propre proxy d'edge : sans ce
-# correctif, request.remote_addr renvoie l'IP interne du proxy (constante
-# ou changeante selon le hop), ce qui rend la limitation par IP inoperante.
-# X-Forwarded-For est ajoute par ce proxy, seul intermediaire de confiance.
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+# Railway termine les connexions via son propre edge, avec un pool d'IP
+# internes rotatives comme dernier maillon de X-Forwarded-For : ProxyFix
+# seul ne suffit pas a retrouver l'IP reelle du client. Railway expose en
+# revanche cette IP directement dans X-Real-Ip, verifie via /debug/ip.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
+
+
+def _client_ip() -> str:
+    return request.headers.get("X-Real-Ip") or get_remote_address()
+
 
 CORS(
     app,
@@ -62,7 +67,7 @@ CORS(
     supports_credentials=True,
 )
 
-limiter = Limiter(get_remote_address, app=app, default_limits=[], storage_uri="memory://")
+limiter = Limiter(_client_ip, app=app, default_limits=[], storage_uri="memory://")
 
 database.init_db()
 
@@ -103,16 +108,6 @@ def _current_user():
 @app.route("/health")
 def health():
     return jsonify(ok=True)
-
-
-@app.route("/debug/ip")
-def debug_ip():
-    return jsonify(
-        remote_addr=request.remote_addr,
-        x_forwarded_for=request.headers.get("X-Forwarded-For"),
-        x_real_ip=request.headers.get("X-Real-Ip"),
-        cf_connecting_ip=request.headers.get("Cf-Connecting-Ip"),
-    )
 
 
 # ---------------------------------------------------------------------------
