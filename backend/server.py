@@ -17,7 +17,7 @@ actuelles plutot que reproduction a l'identique) :
   - CORS restreint a une liste d'origines explicites (jamais '*') ;
   - limitation du nombre de tentatives sur les routes sensibles.
 
-Toutes les valeurs sensibles (base de donnees, SMTP, origines autorisees)
+Toutes les valeurs sensibles (base de donnees, email, origines autorisees)
 viennent des variables d'environnement Railway ; rien n'est ecrit en dur
 dans ce fichier.
 """

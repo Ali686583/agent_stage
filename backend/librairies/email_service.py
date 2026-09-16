@@ -3,12 +3,15 @@ librairies/email_service.py
 ============================
 
 Envoi de l'email de reinitialisation de mot de passe via l'API HTTPS de
-Resend (https://resend.com).
+Brevo (https://www.brevo.com).
 
 Railway bloque les ports SMTP sortants (25/465/587) sur les plans
 Free/Trial/Hobby : un envoi par SMTP classique (Gmail, etc.) echoue toujours
 avec "Network is unreachable" depuis ce service, quel que soit le code.
-Resend contourne le probleme en envoyant par une simple requete HTTPS.
+Brevo contourne le probleme en envoyant par une simple requete HTTPS, et
+autorise l'envoi vers n'importe quel destinataire des qu'un expediteur est
+verifie (contrairement au mode sandbox de Resend, limite a l'adresse du
+compte tant qu'aucun domaine n'est verifie).
 
 Toutes les informations de connexion viennent des variables d'environnement
 Railway : aucune cle n'est ecrite dans le code.
@@ -20,26 +23,28 @@ import os
 
 import requests
 
-RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-RESEND_FROM = os.environ.get("RESEND_FROM", "onboarding@resend.dev")
-RESEND_API_URL = "https://api.resend.com/emails"
+BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
+BREVO_SENDER_EMAIL = os.environ.get("BREVO_SENDER_EMAIL", "")
+BREVO_SENDER_NAME = os.environ.get("BREVO_SENDER_NAME", "agent_stage")
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 
 def send_password_reset_email(to_email: str, reset_link: str) -> None:
-    if not RESEND_API_KEY:
-        raise RuntimeError("RESEND_API_KEY n'est pas configuree.")
+    if not BREVO_API_KEY or not BREVO_SENDER_EMAIL:
+        raise RuntimeError("BREVO_API_KEY / BREVO_SENDER_EMAIL ne sont pas configures.")
 
     response = requests.post(
-        RESEND_API_URL,
+        BREVO_API_URL,
         headers={
-            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "api-key": BREVO_API_KEY,
             "Content-Type": "application/json",
+            "Accept": "application/json",
         },
         json={
-            "from": RESEND_FROM,
-            "to": [to_email],
+            "sender": {"email": BREVO_SENDER_EMAIL, "name": BREVO_SENDER_NAME},
+            "to": [{"email": to_email}],
             "subject": "Reinitialisation de votre mot de passe",
-            "text": (
+            "textContent": (
                 "Bonjour,\n\n"
                 "Une demande de reinitialisation de mot de passe a ete faite "
                 "pour ce compte.\n\n"
