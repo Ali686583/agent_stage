@@ -105,6 +105,16 @@ def health():
     return jsonify(ok=True)
 
 
+@app.route("/debug/ip")
+def debug_ip():
+    return jsonify(
+        remote_addr=request.remote_addr,
+        x_forwarded_for=request.headers.get("X-Forwarded-For"),
+        x_real_ip=request.headers.get("X-Real-Ip"),
+        cf_connecting_ip=request.headers.get("Cf-Connecting-Ip"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Authentification
 # ---------------------------------------------------------------------------
