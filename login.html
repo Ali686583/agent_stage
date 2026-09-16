@@ -175,6 +175,19 @@
       text-align: center;
     }
 
+    /* Lien "Mot de passe oublie ?" sous le bouton de connexion */
+    .forgot-link {
+      width: 320px;
+      max-width: 100%;
+      text-align: center;
+    }
+    .forgot-link a {
+      font-size: 0.85rem;
+      color: #0F6722;
+      text-decoration: none;
+    }
+    .forgot-link a:hover { text-decoration: underline; }
+
     .hidden { display: none; }
   </style>
 </head>
@@ -209,12 +222,15 @@
 
     <button id="btn-login" type="button" class="btn-login">Se connecter</button>
 
+    <div class="forgot-link"><a href="forgot-password.html">Mot de passe oublié ?</a></div>
+
     <hr class="sep">
     <div class="or">ou</div>
 
     <button id="btn-create" type="button" class="btn-create">Créer un compte</button>
     <p id="auth-error" class="auth-error hidden"></p>
   </main>
+  <script src="config.js"></script>
   <script>
     const idInput = document.getElementById("auth-id");
     const passInput = document.getElementById("auth-pass");
@@ -245,10 +261,12 @@
 
     async function goIfAlreadyConnected() {
       try {
-        const response = await fetch("/api/auth/me");
+        const response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/me`, {
+          credentials: "include",
+        });
         const data = await response.json();
         if (response.ok && data.ok) {
-          window.location.href = "/app";
+          window.location.href = "page2.html";
         }
       } catch (error) {
         /* pas connecte : on reste sur la page */
@@ -268,9 +286,10 @@
 
       let response;
       try {
-        response = await fetch("/api/auth/login", {
+        response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({ identifier: identifiant, password: password })
         });
       } catch (error) {
@@ -283,7 +302,7 @@
         showError(data.error || "Connexion impossible.");
         return;
       }
-      window.location.href = "/app";
+      window.location.href = "page2.html";
     });
 
     createButton.addEventListener("click", async () => {
@@ -303,13 +322,13 @@
 
       let response;
       try {
-        response = await fetch("/api/auth/register", {
+        response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
+          credentials: "include",
           body: JSON.stringify({
             username: identifiant,
             email: identifiant,
-            recoveryEmail: "",
             password: password,
           })
         });
@@ -327,7 +346,7 @@
         }
         return;
       }
-      window.location.href = "/app";
+      window.location.href = "page2.html";
     });
 
     goIfAlreadyConnected();
