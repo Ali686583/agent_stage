@@ -5,8 +5,9 @@ server.py
 Backend d'authentification du projet agent_stage.
 
 Reference d'architecture : page_dacceuil.py / librairies/database.py de
-MyBusiness (meme principe general : un point d'entree HTTP qui delegue tout
-le stockage a librairies/database.py, jamais de SQL dans les routes).
+MyBusiness (meme principe general : un seul service sert les pages HTML et
+l'API, avec le stockage entierement delegue a librairies/database.py,
+jamais de SQL dans les routes).
 
 Differences volontaires par rapport a MyBusiness (bonnes pratiques
 actuelles plutot que reproduction a l'identique) :
@@ -14,20 +15,17 @@ actuelles plutot que reproduction a l'identique) :
   - mots de passe haches en Argon2id (argon2-cffi) au lieu de PBKDF2 ;
   - base PostgreSQL persistante (plugin Railway) au lieu de SQLite local ;
   - tokens de session et de reset stockes hachees (jamais en clair) ;
-  - CORS restreint a une liste d'origines explicites (jamais '*') ;
   - limitation du nombre de tentatives sur les routes sensibles.
 
-Toutes les valeurs sensibles (base de donnees, email, origines autorisees)
-viennent des variables d'environnement Railway ; rien n'est ecrit en dur
-dans ce fichier.
+Toutes les valeurs sensibles (base de donnees, email) viennent des
+variables d'environnement Railway ; rien n'est ecrit en dur dans ce fichier.
 """
 
 from __future__ import annotations
 
 import os
 
-from flask import Flask, jsonify, request
-from flask_cors import CORS
+from flask import Flask, jsonify, request, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -38,16 +36,11 @@ from librairies.security import generate_token, hash_token
 
 PORT = int(os.environ.get("PORT", "8080"))
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "").rstrip("/")
-ALLOWED_ORIGINS = [
-    origin.strip()
-    for origin in os.environ.get("ALLOWED_ORIGINS", "").split(",")
-    if origin.strip()
-]
 SESSION_COOKIE_NAME = "agent_stage_session"
 SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() != "false"
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder="frontend", static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 Mo, largement suffisant pour ces routes
 
 # Railway termine les connexions via son propre edge, avec un pool d'IP
@@ -60,12 +53,6 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 def _client_ip() -> str:
     return request.headers.get("X-Real-Ip") or get_remote_address()
 
-
-CORS(
-    app,
-    resources={r"/api/*": {"origins": ALLOWED_ORIGINS or []}},
-    supports_credentials=True,
-)
 
 limiter = Limiter(_client_ip, app=app, default_limits=[], storage_uri="memory://")
 
@@ -89,7 +76,7 @@ def _set_session_cookie(resp, user_id: str) -> None:
         max_age=SESSION_TTL_DAYS * 86400,
         httponly=True,
         secure=COOKIE_SECURE,
-        samesite="None" if COOKIE_SECURE else "Lax",
+        samesite="Lax",
         path="/",
     )
 
@@ -108,6 +95,11 @@ def _current_user():
 @app.route("/health")
 def health():
     return jsonify(ok=True)
+
+
+@app.route("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
 
 
 # ---------------------------------------------------------------------------

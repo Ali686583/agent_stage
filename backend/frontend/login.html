@@ -230,7 +230,6 @@
     <button id="btn-create" type="button" class="btn-create">Créer un compte</button>
     <p id="auth-error" class="auth-error hidden"></p>
   </main>
-  <script src="config.js"></script>
   <script>
     const idInput = document.getElementById("auth-id");
     const passInput = document.getElementById("auth-pass");
@@ -261,7 +260,7 @@
 
     async function goIfAlreadyConnected() {
       try {
-        const response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/me`, {
+        const response = await fetch(`/api/auth/me`, {
           credentials: "include",
         });
         const data = await response.json();
@@ -286,7 +285,7 @@
 
       let response;
       try {
-        response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/login`, {
+        response = await fetch(`/api/auth/login`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -322,7 +321,7 @@
 
       let response;
       try {
-        response = await fetch(`${AGENT_STAGE_API_BASE}/api/auth/register`, {
+        response = await fetch(`/api/auth/register`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
