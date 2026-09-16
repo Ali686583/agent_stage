@@ -30,6 +30,7 @@ from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from librairies import database
 from librairies.email_service import send_password_reset_email
@@ -48,6 +49,12 @@ COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() != "false"
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 Mo, largement suffisant pour ces routes
+
+# Railway termine les connexions via son propre proxy d'edge : sans ce
+# correctif, request.remote_addr renvoie l'IP interne du proxy (constante
+# ou changeante selon le hop), ce qui rend la limitation par IP inoperante.
+# X-Forwarded-For est ajoute par ce proxy, seul intermediaire de confiance.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 CORS(
     app,
