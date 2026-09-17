@@ -46,7 +46,12 @@
 
       <button type="button" class="sidebar-notch" id="ws-sidebar-notch" aria-label="Fermer le menu">
         <svg class="sidebar-notch-shape" viewBox="0 0 22 46" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0,4 Q0,0 4,0 L14,8 Q18,10 18,14 L18,32 Q18,36 14,38 L4,46 Q0,46 0,42 Z"/>
+          <!-- Remplissage complet (aucun trait) : coupe la jonction avec la
+               sidebar, jamais visible comme un bord separe. -->
+          <path class="notch-fill" d="M0,4 Q0,0 4,0 L14,8 Q18,10 18,14 L18,32 Q18,36 14,38 L4,46 Q0,46 0,42 Z"/>
+          <!-- Contour trace uniquement sur les 3 cotes exposes (pas le cote
+               attache a la sidebar) : evite toute double bordure. -->
+          <path class="notch-outline" d="M0,4 Q0,0 4,0 L14,8 Q18,10 18,14 L18,32 Q18,36 14,38 L4,46 Q0,46 0,42"/>
         </svg>
         <svg class="notch-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
           <path d="M15 18l-6-6 6-6"/>

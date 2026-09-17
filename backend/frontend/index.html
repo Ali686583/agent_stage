@@ -40,14 +40,14 @@
 
   <script src="theme.js"></script>
   <script>
-    // Duree reelle du GIF apres reduction des pauses statiques internes
-    // (39 frames, ~2800ms ; le dessin/mouvement n'a pas ete touche, seuls
-    // deux temps morts ont ete raccourcis - voir l'historique git).
-    const ANIMATION_DURATION_MS = 2800;
-    // Fondu CSS supplementaire en toute fin, superpose a la propre fin en
-    // fondu du GIF : garantit une disparition progressive nette quel que
-    // soit le rendu exact des dernieres frames.
-    const FADE_MS = 350;
+    // Le GIF lui-meme dure ~2800ms (39 frames, temps morts internes deja
+    // raccourcis - voir historique git) mais la page reste affichee plus
+    // longtemps que ca : le point de declenchement du fondu (2450ms) ne
+    // bouge pas, seule la queue en fondu est etiree pour durer ~1s de plus
+    // qu'avant (1350ms au lieu de 350ms), en un seul fondu CSS continu -
+    // jamais de pause figee avant ou apres.
+    const ANIMATION_DURATION_MS = 3800;
+    const FADE_MS = 1350;
 
     const img = document.getElementById("intro-logo");
     const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;

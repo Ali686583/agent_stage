@@ -62,12 +62,19 @@ html, body {
 
 /* Encoche en forme de trapeze aux angles arrondis (dessinee en SVG : un
    clip-path/border-radius CSS ne peut pas arrondir les coins d'un trapeze).
-   La forme est une couche de fond (.sidebar-notch-shape) ; la fleche est une
-   seconde couche par-dessus, seule a tourner selon l'etat ouvert/ferme. */
+   La fleche est une couche par-dessus, seule a tourner selon l'etat
+   ouvert/ferme.
+
+   Fusion avec la sidebar : le bouton chevauche son bord de 3px
+   (inset-inline-start decale de -3px) et .notch-fill peint le meme
+   --color-topbar-bg sur cette zone, effacant visuellement la bordure de la
+   sidebar a cet endroit. .notch-outline ne trace que les 3 cotes EXPOSES du
+   trapeze (chemin ouvert, sans le cote attache) : jamais de double bordure
+   a la jonction, seulement le contour exterieur. */
 .sidebar-notch {
   position: absolute;
   top: 50%;
-  inset-inline-start: 100%;
+  inset-inline-start: calc(100% - 3px);
   transform: translateY(-50%);
   width: 22px;
   height: 46px;
@@ -87,10 +94,9 @@ html, body {
   inset: 0;
   width: 100%;
   height: 100%;
-  fill: var(--color-topbar-bg);
-  stroke: var(--color-border);
-  stroke-width: 1.2;
 }
+.notch-fill { fill: var(--color-topbar-bg); stroke: none; }
+.notch-outline { fill: none; stroke: var(--color-border); stroke-width: 1.2; stroke-linecap: round; }
 :root[dir="rtl"] .sidebar-notch-shape { transform: scaleX(-1); }
 .notch-arrow {
   position: relative;
