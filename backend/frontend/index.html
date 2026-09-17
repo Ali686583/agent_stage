@@ -41,13 +41,12 @@
   <script src="theme.js"></script>
   <script>
     // Le GIF lui-meme dure ~2800ms (39 frames, temps morts internes deja
-    // raccourcis - voir historique git) mais la page reste affichee plus
-    // longtemps que ca : le point de declenchement du fondu (2450ms) ne
-    // bouge pas, seule la queue en fondu est etiree pour durer ~1s de plus
-    // qu'avant (1350ms au lieu de 350ms), en un seul fondu CSS continu -
-    // jamais de pause figee avant ou apres.
+    // raccourcis - voir historique git) et reste fige sur sa derniere frame
+    // (scene de fin) une fois termine. Cette scene de fin reste affichee
+    // 1s de plus qu'avant (jusqu'a 3800ms) avant que le fondu ne demarre ;
+    // le fondu lui-meme garde sa duree d'origine (350ms), non etiree.
     const ANIMATION_DURATION_MS = 3800;
-    const FADE_MS = 1350;
+    const FADE_MS = 350;
 
     const img = document.getElementById("intro-logo");
     const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
