@@ -786,7 +786,17 @@
         const pending = resolvePendingRequest(message.requestId);
         if (pending) pending.loadingRow.remove();
       }
-      if (state.seenMessageIds.has(message.id)) return; // deja rendu localement (propre envoi) ou deja vu
+      if (message.userId && state.user && message.userId === state.user.id) {
+        // Notre propre message : deja affiche de maniere optimiste dans
+        // sendMessage() des l'envoi. Le seul risque ici est une course ou
+        // cet echo SSE arrive avant que la reponse HTTP du POST n'ait marque
+        // le message comme vu (voir sendMessage) ; on se contente donc de
+        // retenir son id/seq sans le re-rendre, pour ne jamais le dupliquer.
+        state.seenMessageIds.add(message.id);
+        if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
+        return;
+      }
+      if (state.seenMessageIds.has(message.id)) return; // deja vu (reconnexion, autre onglet, etc.)
       state.seenMessageIds.add(message.id);
       if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
       // Retire l'indicateur typing de l'auteur (il vient d'envoyer) sans
