@@ -6,4 +6,3 @@ psycopg[binary]==3.2.4
 requests==2.32.3
 Pillow==10.4.0
 redis==5.0.8
-gevent==24.2.1
