@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import secrets
 import time
 import uuid
 from contextlib import contextmanager
@@ -70,6 +71,10 @@ def init_db() -> None:
             );
             """
         )
+        # Migration additive : identite affichee (pseudonyme + avatar),
+        # distincte de l'email de connexion qui ne change jamais ici.
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;")
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_reference TEXT;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -255,11 +260,23 @@ def normalize_username(value: str) -> str:
     return cleaned[:40]
 
 
+def display_name_for(row: dict) -> str:
+    """Identite AFFICHEE : le pseudonyme s'il existe, sinon l'email.
+    Jamais utilisee comme identifiant technique (voir row['id'])."""
+    return row.get("display_name") or row["email"]
+
+
+def avatar_url_for(row: dict) -> str | None:
+    return f"/api/auth/avatar/{row['id']}" if row.get("avatar_reference") else None
+
+
 def _public_user(row: dict) -> dict:
     return {
         "id": row["id"],
         "username": row["username"],
         "email": row["email"],
+        "displayName": display_name_for(row),
+        "avatarUrl": avatar_url_for(row),
     }
 
 
@@ -288,7 +305,13 @@ def create_user(username: str, email: str, password: str) -> dict:
                VALUES (%s, %s, %s, %s)""",
             (user_id, normalized_username, normalized_email, pwd_hash),
         )
-    return {"id": user_id, "username": normalized_username, "email": normalized_email}
+    return {
+        "id": user_id,
+        "username": normalized_username,
+        "email": normalized_email,
+        "displayName": normalized_email,
+        "avatarUrl": None,
+    }
 
 
 def authenticate_user(identifier: str, password: str) -> dict | None:
@@ -336,6 +359,107 @@ def set_password(user_id: str, new_password: str) -> None:
             "UPDATE users SET password_hash = %s, updated_at = now() WHERE id = %s",
             (hash_password(new_password), user_id),
         )
+
+
+# ---------------------------------------------------------------------------
+# Profil (pseudonyme, avatar) et suppression de compte
+# ---------------------------------------------------------------------------
+
+_DISPLAY_NAME_MIN = 2
+_DISPLAY_NAME_MAX = 40
+
+
+def normalize_display_name(value: str) -> str:
+    # Le frontend affiche toujours ce champ via textContent (jamais
+    # interprete comme HTML) ; on retire quand meme les chevrons en defense
+    # en profondeur, pour ne jamais persister quelque chose qui y ressemble.
+    cleaned = (value or "").strip().replace("<", "").replace(">", "")
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) < _DISPLAY_NAME_MIN:
+        raise ValueError(f"Le pseudonyme doit contenir au moins {_DISPLAY_NAME_MIN} caracteres.")
+    if len(cleaned) > _DISPLAY_NAME_MAX:
+        raise ValueError(f"Le pseudonyme doit contenir au plus {_DISPLAY_NAME_MAX} caracteres.")
+    return cleaned
+
+
+def set_display_name(user_id: str, display_name: str) -> dict:
+    cleaned = normalize_display_name(display_name)
+    with _db() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = %s, updated_at = now() WHERE id = %s",
+            (cleaned, user_id),
+        )
+    return get_user_by_id(user_id)
+
+
+def clear_display_name(user_id: str) -> dict:
+    """Retire le pseudonyme : l'email redevient l'identite affichee."""
+    with _db() as conn:
+        conn.execute(
+            "UPDATE users SET display_name = NULL, updated_at = now() WHERE id = %s",
+            (user_id,),
+        )
+    return get_user_by_id(user_id)
+
+
+def set_avatar_reference(user_id: str, avatar_reference: str) -> dict:
+    with _db() as conn:
+        conn.execute(
+            "UPDATE users SET avatar_reference = %s, updated_at = now() WHERE id = %s",
+            (avatar_reference, user_id),
+        )
+    return get_user_by_id(user_id)
+
+
+def get_avatar_reference(user_id: str) -> str | None:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT avatar_reference FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+    return row["avatar_reference"] if row else None
+
+
+def delete_account(user_id: str) -> str | None:
+    """Anonymise le compte plutot que de supprimer la ligne `users` :
+    PAGE 3 est un espace collaboratif partage, donc les conversations,
+    projets, messages et resultats crees par cet utilisateur restent
+    references par d'autres (created_by_user_id, messages.user_id, etc.) et
+    doivent survivre intacts a la suppression de SON compte.
+
+    Seules les donnees strictement personnelles sont reellement supprimees :
+    sessions actives, tokens de reset en attente, et le hash de mot de passe
+    (remplace par une valeur aleatoire qu'aucun mot de passe ne peut jamais
+    produire). L'email et l'identifiant sont remplaces par des valeurs
+    "tombstone" uniques : l'ancien email redevient disponible pour un futur
+    compte, et aucune connexion n'est plus jamais possible avec les anciens
+    identifiants.
+
+    Renvoie l'ancienne reference d'avatar (a supprimer du disque par
+    l'appelant, cote fichiers), ou None si le compte n'existait pas.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT avatar_reference FROM users WHERE id = %s", (user_id,)
+        ).fetchone()
+        if not row:
+            return None
+        old_avatar = row["avatar_reference"]
+
+        tombstone_email = f"deleted-{user_id}@deleted.invalid"
+        tombstone_username = f"deleted_{user_id.replace('-', '')[:20]}"
+        unusable_hash = hash_password(secrets.token_urlsafe(32))
+
+        conn.execute(
+            """UPDATE users
+               SET email = %s, username = %s, password_hash = %s,
+                   display_name = 'Compte supprime', avatar_reference = NULL,
+                   updated_at = now()
+               WHERE id = %s""",
+            (tombstone_email, tombstone_username, unusable_hash, user_id),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+        conn.execute("DELETE FROM password_reset_tokens WHERE user_id = %s", (user_id,))
+    return old_avatar
 
 
 # ---------------------------------------------------------------------------

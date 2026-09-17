@@ -152,7 +152,7 @@ def create_project_route():
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", ""))[:200]
     try:
-        project = workspace.create_project(user["id"], user["username"], name)
+        project = workspace.create_project(user["id"], user["displayName"], name)
     except ValueError as exc:
         return _error(400, str(exc))
     return jsonify(ok=True, project=project)
@@ -215,6 +215,34 @@ def add_conversation_to_project_route(conversation_id):
         workspace.add_conversation_to_project(project_id, conversation_id, user["id"])
     except ValueError as exc:
         return _error(404, str(exc))
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/conversations/<conversation_id>", methods=["DELETE"])
+def delete_conversation_route(conversation_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        deleted = workspace.delete_conversation(conversation_id, user["id"])
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    if not deleted:
+        return _error(404, "Conversation introuvable.")
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/projects/<project_id>", methods=["DELETE"])
+def delete_project_route(project_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        deleted = workspace.delete_project(project_id, user["id"])
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    if not deleted:
+        return _error(404, "Projet introuvable.")
     return jsonify(ok=True)
 
 
@@ -395,7 +423,7 @@ def send_message_route():
         if is_new_conversation:
             try:
                 conversation = workspace.create_conversation(
-                    user["id"], user["username"], workspace.derive_title(message_text), project_id
+                    user["id"], user["displayName"], workspace.derive_title(message_text), project_id
                 )
             except ValueError as exc:
                 return _error(404, str(exc))
@@ -408,7 +436,7 @@ def send_message_route():
         user_message = workspace.add_message(
             conversation_id=conversation_id,
             user_id=user["id"],
-            author_name=user["username"],
+            author_name=user["displayName"],
             role="user",
             content=message_text,
             model=model,
@@ -447,7 +475,7 @@ def send_message_route():
         "requestId": request_id,
         "conversationId": conversation_id,
         "userId": user["id"],
-        "userName": user["username"],
+        "userName": user["displayName"],
         "model": model,
         "message": message_text,
         "fileIds": file_ids,

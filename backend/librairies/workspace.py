@@ -45,12 +45,21 @@ def derive_title(message: str) -> str:
 # Serialisation
 # ---------------------------------------------------------------------------
 
+def _avatar_url(row: dict, avatar_key: str = "live_avatar") -> str | None:
+    ref = row.get(avatar_key)
+    user_id = row.get("live_user_id") or row.get("created_by_user_id") or row.get("user_id")
+    return f"/api/auth/avatar/{user_id}" if ref and user_id else None
+
+
 def _public_project(row: dict) -> dict:
     return {
         "id": row["id"],
         "name": row["name"],
         "createdByUserId": row["created_by_user_id"],
-        "createdByName": row["created_by_name"],
+        # Identite AFFICHEE resolue au moment de la lecture (pseudonyme
+        # actuel, ou email si aucun) : jamais le snapshot fige en base.
+        "createdByName": row.get("live_name") or row["created_by_name"],
+        "createdByAvatarUrl": _avatar_url(row),
         "createdAt": row["created_at"].isoformat(),
         "updatedAt": row["updated_at"].isoformat(),
         "conversationCount": row.get("conversation_count", 0),
@@ -62,7 +71,8 @@ def _public_conversation(row: dict) -> dict:
         "id": row["id"],
         "title": row["title"],
         "createdByUserId": row["created_by_user_id"],
-        "createdByName": row["created_by_name"],
+        "createdByName": row.get("live_name") or row["created_by_name"],
+        "createdByAvatarUrl": _avatar_url(row),
         "createdAt": row["created_at"].isoformat(),
         "updatedAt": row["updated_at"].isoformat(),
     }
@@ -73,7 +83,10 @@ def _public_message(row: dict) -> dict:
         "id": row["id"],
         "conversationId": row["conversation_id"],
         "userId": row["user_id"],
-        "authorName": row["author_name"],
+        # Pour un message assistant (user_id NULL), pas de jointure : on
+        # garde le nom fige ("ChatGPT"/"Claude", qui ne change jamais).
+        "authorName": row.get("live_name") or row["author_name"],
+        "authorAvatarUrl": _avatar_url(row) if row["user_id"] else None,
         "role": row["role"],
         "content": row["content"],
         "blocks": row["blocks"],
@@ -138,10 +151,12 @@ def list_projects() -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT p.*, count(pc.conversation_id) AS conversation_count
+            SELECT p.*, count(DISTINCT pc.conversation_id) AS conversation_count,
+                   COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
             FROM projects p
             LEFT JOIN project_conversations pc ON pc.project_id = p.id
-            GROUP BY p.id
+            LEFT JOIN users u ON u.id = p.created_by_user_id
+            GROUP BY p.id, u.display_name, u.email, u.avatar_reference
             ORDER BY p.updated_at DESC
             """
         ).fetchall()
@@ -181,16 +196,20 @@ def list_project_conversations(project_id: str, limit: int = 30, before: str | N
     with _db() as conn:
         if before:
             rows = conn.execute(
-                """SELECT c.* FROM conversations c
+                """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+                   FROM conversations c
                    JOIN project_conversations pc ON pc.conversation_id = c.id
+                   LEFT JOIN users u ON u.id = c.created_by_user_id
                    WHERE pc.project_id = %s AND c.updated_at < %s
                    ORDER BY c.updated_at DESC LIMIT %s""",
                 (project_id, before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT c.* FROM conversations c
+                """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+                   FROM conversations c
                    JOIN project_conversations pc ON pc.conversation_id = c.id
+                   LEFT JOIN users u ON u.id = c.created_by_user_id
                    WHERE pc.project_id = %s
                    ORDER BY c.updated_at DESC LIMIT %s""",
                 (project_id, limit),
@@ -212,6 +231,23 @@ def add_conversation_to_project(project_id: str, conversation_id: str, user_id: 
         conn.execute("UPDATE projects SET updated_at = now() WHERE id = %s", (project_id,))
 
 
+def delete_project(project_id: str, user_id: str) -> bool:
+    """Supprime un projet et ses associations project_conversations
+    (ON DELETE CASCADE) : les conversations elles-memes NE sont PAS
+    supprimees, elles restent dans Discussions. Seul le createur peut
+    supprimer. Renvoie False si le projet n'existe pas."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT created_by_user_id FROM projects WHERE id = %s", (project_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["created_by_user_id"] != user_id:
+            raise PermissionError("Seul le createur peut supprimer ce projet.")
+        conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Conversations
 # ---------------------------------------------------------------------------
@@ -221,13 +257,19 @@ def list_conversations(limit: int = 30, before: str | None = None) -> list[dict]
     with _db() as conn:
         if before:
             rows = conn.execute(
-                """SELECT * FROM conversations WHERE updated_at < %s
-                   ORDER BY updated_at DESC LIMIT %s""",
+                """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+                   FROM conversations c
+                   LEFT JOIN users u ON u.id = c.created_by_user_id
+                   WHERE c.updated_at < %s
+                   ORDER BY c.updated_at DESC LIMIT %s""",
                 (before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT %s",
+                """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+                   FROM conversations c
+                   LEFT JOIN users u ON u.id = c.created_by_user_id
+                   ORDER BY c.updated_at DESC LIMIT %s""",
                 (limit,),
             ).fetchall()
     return [_public_conversation(r) for r in rows]
@@ -235,7 +277,13 @@ def list_conversations(limit: int = 30, before: str | None = None) -> list[dict]
 
 def get_conversation(conversation_id: str) -> dict | None:
     with _db() as conn:
-        row = conn.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
+        row = conn.execute(
+            """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+               FROM conversations c
+               LEFT JOIN users u ON u.id = c.created_by_user_id
+               WHERE c.id = %s""",
+            (conversation_id,),
+        ).fetchone()
     return _public_conversation(row) if row else None
 
 
@@ -300,9 +348,16 @@ def add_message(
     return get_message(message_id)
 
 
+_MESSAGE_SELECT = """
+    SELECT m.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+    FROM messages m
+    LEFT JOIN users u ON u.id = m.user_id
+"""
+
+
 def get_message(message_id: str) -> dict | None:
     with _db() as conn:
-        row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
+        row = conn.execute(_MESSAGE_SELECT + " WHERE m.id = %s", (message_id,)).fetchone()
     return _public_message(row) if row else None
 
 
@@ -311,18 +366,35 @@ def list_messages(conversation_id: str, limit: int = 50, before: str | None = No
     with _db() as conn:
         if before:
             rows = conn.execute(
-                """SELECT * FROM messages WHERE conversation_id = %s AND created_at < %s
-                   ORDER BY created_at DESC LIMIT %s""",
+                _MESSAGE_SELECT + " WHERE m.conversation_id = %s AND m.created_at < %s"
+                " ORDER BY m.created_at DESC LIMIT %s",
                 (conversation_id, before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
-                """SELECT * FROM messages WHERE conversation_id = %s
-                   ORDER BY created_at DESC LIMIT %s""",
+                _MESSAGE_SELECT + " WHERE m.conversation_id = %s"
+                " ORDER BY m.created_at DESC LIMIT %s",
                 (conversation_id, limit),
             ).fetchall()
     rows.reverse()
     return [_public_message(r) for r in rows]
+
+
+def delete_conversation(conversation_id: str, user_id: str) -> bool:
+    """Supprime une conversation et tout ce qui lui est rattache (messages,
+    pieces jointes, resultats, workflow_runs, associations aux projets) via
+    les contraintes ON DELETE CASCADE deja definies sur ces tables. Seul le
+    createur peut supprimer. Renvoie False si la conversation n'existe pas."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT created_by_user_id FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["created_by_user_id"] != user_id:
+            raise PermissionError("Seul le createur peut supprimer cette conversation.")
+        conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +462,28 @@ def list_message_attachments(message_id: str) -> list[dict]:
             (message_id,),
         ).fetchall()
     return [_public_file(r) for r in rows]
+
+
+def list_orphan_files_for_user(user_id: str) -> list[dict]:
+    """Fichiers uploades par cet utilisateur mais jamais rattaches a un
+    message (donc jamais partages dans une conversation) : purement
+    personnels. Utilise lors de la suppression de compte pour ne nettoyer
+    reellement que les donnees strictement personnelles."""
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT f.* FROM files f
+               WHERE f.uploaded_by_user_id = %s
+                 AND NOT EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.file_id = f.id)""",
+            (user_id,),
+        ).fetchall()
+    return [_public_file(r) for r in rows]
+
+
+def delete_files(file_ids: list[str]) -> None:
+    if not file_ids:
+        return
+    with _db() as conn:
+        conn.execute("DELETE FROM files WHERE id = ANY(%s)", (file_ids,))
 
 
 # ---------------------------------------------------------------------------

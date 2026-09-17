@@ -7,6 +7,17 @@
 
   const API = "/api/workspace";
 
+  // Widgets d'actions : de vrais boutons, jamais un menu deroulant.
+  // Structure prete pour brancher une vraie action n8n plus tard (action.id
+  // doit alors correspondre a l'allowlist du backend, cf. workspace_routes.py).
+  const ACTION_WIDGETS = [
+    { label: "Label 1", icon: null, action: { id: null, type: null, parameters: {} } },
+    { label: "Label 2", icon: null, action: { id: null, type: null, parameters: {} } },
+    { label: "Label 3", icon: null, action: { id: null, type: null, parameters: {} } },
+    { label: "Label 4", icon: null, action: { id: null, type: null, parameters: {} } },
+    { label: "Label 5", icon: null, action: { id: null, type: null, parameters: {} } },
+  ];
+
   const state = {
     user: null,
     conversationId: null,
@@ -14,12 +25,9 @@
     model: "chatgpt",
     attachments: [], // {fileId, name, status: 'uploading'|'uploaded'|'failed'}
     sourceResultIds: [],
-    selectedAction: null,
-    actionsCatalog: [],
+    selectedWidgetIndex: null,
     projects: [],
-    projectConversations: {}, // projectId -> {items, cursor, open}
     discussionsCursor: null,
-    discussionsItems: [],
     sending: false,
     sidebarCollapsed: false,
   };
@@ -58,8 +66,7 @@
 
   function formatDate(iso) {
     try {
-      const date = new Date(iso);
-      return date.toLocaleString(document.documentElement.lang || "fr", {
+      return new Date(iso).toLocaleString(document.documentElement.lang || "fr", {
         day: "2-digit",
         month: "short",
         hour: "2-digit",
@@ -70,8 +77,32 @@
     }
   }
 
+  function avatarNode(className, avatarUrl, fallbackText) {
+    if (avatarUrl) {
+      return el("img", { class: className, src: avatarUrl, alt: "" });
+    }
+    const span = el("span", { class: className });
+    span.textContent = (fallbackText || "?").trim().charAt(0).toUpperCase();
+    return span;
+  }
+
   async function api(path, options) {
     const response = await fetch(API + path, {
+      credentials: "include",
+      headers: options && options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
+      ...options,
+    });
+    let data = {};
+    try {
+      data = await response.json();
+    } catch (error) {
+      data = {};
+    }
+    return { ok: response.ok, status: response.status, data };
+  }
+
+  async function authApi(path, options) {
+    const response = await fetch(`/api/auth${path}`, {
       credentials: "include",
       headers: options && options.body instanceof FormData ? {} : { "Content-Type": "application/json" },
       ...options,
@@ -92,6 +123,7 @@
   const dom = {};
 
   function cacheDom() {
+    dom.sidebarColumn = document.getElementById("ws-sidebar-column");
     dom.sidebar = document.getElementById("ws-sidebar");
     dom.sidebarNotch = document.getElementById("ws-sidebar-notch");
     dom.mobileToggle = document.getElementById("ws-mobile-toggle");
@@ -106,6 +138,7 @@
     dom.projectCreateBtn = document.getElementById("ws-project-create-btn");
     dom.discussionsList = document.getElementById("ws-discussions-list");
     dom.newDiscussionBtn = document.getElementById("ws-new-discussion-btn");
+    dom.centralColumn = document.getElementById("ws-central-column");
     dom.conversationArea = document.getElementById("ws-conversation-area");
     dom.composer = document.getElementById("ws-composer");
     dom.composerTextarea = document.getElementById("ws-textarea");
@@ -114,20 +147,87 @@
     dom.attachBtn = document.getElementById("ws-attach-btn");
     dom.sendBtn = document.getElementById("ws-send-btn");
     dom.modelButtons = Array.from(document.querySelectorAll(".model-selector button"));
-    dom.actionsBtn = document.getElementById("ws-actions-btn");
-    dom.actionsMenu = document.getElementById("ws-actions-menu");
+    dom.actionWidgets = document.getElementById("ws-action-widgets");
     dom.profileTrigger = document.getElementById("ws-profile-trigger");
     dom.profileMenu = document.getElementById("ws-profile-menu");
     dom.profileName = document.getElementById("ws-profile-name");
+    dom.profileAvatar = document.getElementById("ws-profile-avatar");
+    dom.profileMenuAvatar = document.getElementById("ws-profile-menu-avatar");
     dom.profileMenuName = document.getElementById("ws-profile-menu-name");
     dom.profileMenuEmail = document.getElementById("ws-profile-menu-email");
-    dom.profileAvatar = document.getElementById("ws-profile-avatar");
     dom.logoutBtn = document.getElementById("ws-logout-btn");
+    dom.moreOptionsBtn = document.getElementById("ws-more-options-btn");
+    dom.moreOptionsPanel = document.getElementById("ws-more-options-panel");
+    dom.optAvatar = document.getElementById("ws-opt-avatar");
+    dom.optNickname = document.getElementById("ws-opt-nickname");
+    dom.optDeleteAccount = document.getElementById("ws-opt-delete-account");
+    dom.avatarInput = document.getElementById("ws-avatar-input");
+    dom.nicknameForm = document.getElementById("ws-nickname-form");
+    dom.nicknameInput = document.getElementById("ws-nickname-input");
+    dom.nicknameCancel = document.getElementById("ws-nickname-cancel");
+    dom.nicknameSave = document.getElementById("ws-nickname-save");
+    dom.nicknameRemove = document.getElementById("ws-nickname-remove");
+    dom.modalOverlay = document.getElementById("ws-modal-overlay");
+    dom.modalMessage = document.getElementById("ws-modal-message");
+    dom.modalCancel = document.getElementById("ws-modal-cancel");
+    dom.modalConfirm = document.getElementById("ws-modal-confirm");
+  }
+
+  // ---------------------------------------------------------------------
+  // Modale de confirmation generique
+  // ---------------------------------------------------------------------
+
+  let modalConfirmHandler = null;
+  let modalLastFocused = null;
+
+  function showConfirmModal(message, onConfirm) {
+    dom.modalMessage.textContent = message;
+    modalConfirmHandler = onConfirm;
+    modalLastFocused = document.activeElement;
+    dom.modalOverlay.classList.remove("hidden");
+    dom.modalConfirm.focus();
+  }
+
+  function hideConfirmModal() {
+    dom.modalOverlay.classList.add("hidden");
+    modalConfirmHandler = null;
+    if (modalLastFocused && modalLastFocused.focus) modalLastFocused.focus();
+  }
+
+  function wireModal() {
+    dom.modalCancel.addEventListener("click", hideConfirmModal);
+    dom.modalOverlay.addEventListener("click", (event) => {
+      if (event.target === dom.modalOverlay) hideConfirmModal();
+    });
+    dom.modalConfirm.addEventListener("click", () => {
+      const handler = modalConfirmHandler;
+      hideConfirmModal();
+      if (handler) handler();
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !dom.modalOverlay.classList.contains("hidden")) {
+        hideConfirmModal();
+      }
+    });
   }
 
   // ---------------------------------------------------------------------
   // Auth / profil
   // ---------------------------------------------------------------------
+
+  function applyUserToUI() {
+    const user = state.user;
+    dom.profileAvatar.replaceWith((dom.profileAvatar = avatarNode("avatar", user.avatarUrl, user.displayName)));
+    dom.profileAvatar.id = "ws-profile-avatar";
+    dom.profileName.textContent = user.displayName;
+    dom.profileMenuAvatar.replaceWith(
+      (dom.profileMenuAvatar = avatarNode("avatar avatar-lg", user.avatarUrl, user.displayName))
+    );
+    dom.profileMenuAvatar.id = "ws-profile-menu-avatar";
+    dom.profileMenuName.textContent = user.displayName;
+    dom.profileMenuEmail.textContent = user.email;
+    dom.profileMenuEmail.title = user.email;
+  }
 
   async function loadUser() {
     const response = await fetch("/api/auth/me", { credentials: "include" });
@@ -137,11 +237,7 @@
       return false;
     }
     state.user = data.user;
-    const initial = (state.user.username || "?").trim().charAt(0).toUpperCase();
-    dom.profileAvatar.textContent = initial;
-    dom.profileName.textContent = state.user.username;
-    dom.profileMenuName.textContent = state.user.username;
-    dom.profileMenuEmail.textContent = state.user.email;
+    applyUserToUI();
     return true;
   }
 
@@ -150,13 +246,75 @@
       event.stopPropagation();
       dom.profileMenu.classList.toggle("open");
     });
-    document.addEventListener("click", () => dom.profileMenu.classList.remove("open"));
-    document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") dom.profileMenu.classList.remove("open");
+    document.addEventListener("click", () => {
+      dom.profileMenu.classList.remove("open");
+      dom.moreOptionsPanel.classList.add("hidden");
+      dom.nicknameForm.classList.add("hidden");
     });
+    dom.profileMenu.addEventListener("click", (event) => event.stopPropagation());
+
     dom.logoutBtn.addEventListener("click", async () => {
       await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
       window.location.href = "login.html";
+    });
+
+    dom.moreOptionsBtn.addEventListener("click", () => {
+      dom.moreOptionsPanel.classList.toggle("hidden");
+      dom.nicknameForm.classList.add("hidden");
+    });
+
+    dom.optAvatar.addEventListener("click", () => dom.avatarInput.click());
+    dom.avatarInput.addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      event.target.value = "";
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("file", file);
+      const { ok, data } = await authApi("/avatar", { method: "POST", body: formData });
+      if (ok && data.ok) {
+        state.user = data.user;
+        applyUserToUI();
+      }
+    });
+
+    dom.optNickname.addEventListener("click", () => {
+      dom.nicknameInput.value = state.user.displayName === state.user.email ? "" : state.user.displayName;
+      dom.nicknameForm.classList.toggle("hidden");
+    });
+    dom.nicknameCancel.addEventListener("click", () => dom.nicknameForm.classList.add("hidden"));
+    dom.nicknameSave.addEventListener("click", async () => {
+      const value = dom.nicknameInput.value.trim();
+      if (!value) return;
+      const { ok, data } = await authApi("/display-name", {
+        method: "POST",
+        body: JSON.stringify({ displayName: value }),
+      });
+      if (ok && data.ok) {
+        state.user = data.user;
+        applyUserToUI();
+        dom.nicknameForm.classList.add("hidden");
+        loadDiscussions(true);
+      }
+    });
+    dom.nicknameRemove.addEventListener("click", async () => {
+      const { ok, data } = await authApi("/display-name", { method: "DELETE" });
+      if (ok && data.ok) {
+        state.user = data.user;
+        applyUserToUI();
+        dom.nicknameForm.classList.add("hidden");
+        loadDiscussions(true);
+      }
+    });
+
+    dom.optDeleteAccount.addEventListener("click", () => {
+      showConfirmModal(t("workspace.confirm_delete_account"), async () => {
+        const { ok, data } = await authApi("/account", { method: "DELETE" });
+        if (ok && data.ok) {
+          window.location.href = "login.html";
+        } else {
+          showConfirmModal(t("workspace.error_generic"), null);
+        }
+      });
     });
   }
 
@@ -183,11 +341,11 @@
     });
 
     dom.mobileToggle.addEventListener("click", () => {
-      dom.sidebar.classList.toggle("mobile-open");
+      dom.sidebarColumn.classList.toggle("mobile-open");
       dom.backdrop.classList.toggle("visible");
     });
     dom.backdrop.addEventListener("click", () => {
-      dom.sidebar.classList.remove("mobile-open");
+      dom.sidebarColumn.classList.remove("mobile-open");
       dom.backdrop.classList.remove("visible");
     });
   }
@@ -219,21 +377,31 @@
   function renderProjects() {
     dom.projectsList.innerHTML = "";
     if (!state.projects.length) {
-      dom.projectsList.appendChild(el("div", { class: "sidebar-empty", "data-i18n": "workspace.no_projects", text: t("workspace.no_projects") }));
+      dom.projectsList.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_projects") }));
       return;
     }
     state.projects.forEach((project) => {
       const group = el("div", { class: "sidebar-project-group" });
       const header = el("div", { class: "sidebar-project-name" }, [
         el("span", { class: "section-chevron" }, [chevronIcon()]),
-        el("span", { text: project.name }),
+        el("span", { text: project.name, style: "flex:1;" }),
+        el("button", {
+          class: "sidebar-item-menu-btn forced-visible",
+          type: "button",
+          "aria-label": t("workspace.conversation_menu"),
+          text: "⋯",
+          onclick: (event) => {
+            event.stopPropagation();
+            openProjectMenu(project, header);
+          },
+        }),
       ]);
       const list = el("div", { class: "sidebar-list hidden" });
       let loaded = false;
       header.addEventListener("click", async () => {
         const willOpen = list.classList.contains("hidden");
         list.classList.toggle("hidden");
-        header.parentElement.classList.toggle("open", willOpen);
+        group.classList.toggle("open", willOpen);
         if (willOpen && !loaded) {
           loaded = true;
           await loadProjectConversations(project.id, list);
@@ -259,17 +427,17 @@
   }
 
   function chevronIcon() {
-    const wrapper = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    wrapper.setAttribute("width", "12");
-    wrapper.setAttribute("height", "12");
-    wrapper.setAttribute("viewBox", "0 0 24 24");
-    wrapper.setAttribute("fill", "none");
-    wrapper.setAttribute("stroke", "currentColor");
-    wrapper.setAttribute("stroke-width", "2.5");
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "12");
+    svg.setAttribute("height", "12");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.5");
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", "M9 18l6-6-6-6");
-    wrapper.appendChild(path);
-    return wrapper;
+    svg.appendChild(path);
+    return svg;
   }
 
   async function submitNewProject() {
@@ -283,13 +451,39 @@
     }
   }
 
+  function openProjectMenu(project, anchorEl) {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    if (project.createdByUserId === state.user.id) {
+      menu.appendChild(
+        el("button", {
+          type: "button",
+          class: "danger-text",
+          text: t("workspace.delete_project"),
+          onclick: (event) => {
+            event.stopPropagation();
+            closeContextMenu();
+            showConfirmModal(t("workspace.confirm_delete_project"), async () => {
+              const { ok } = await api(`/projects/${project.id}`, { method: "DELETE" });
+              if (ok) await loadProjects();
+            });
+          },
+        })
+      );
+    } else {
+      menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_permission") }));
+    }
+    anchorEl.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
   // ---------------------------------------------------------------------
   // Discussions (historique partage)
   // ---------------------------------------------------------------------
 
   async function loadDiscussions(reset) {
     if (reset) {
-      state.discussionsItems = [];
       state.discussionsCursor = null;
       dom.discussionsList.innerHTML = "";
     }
@@ -301,24 +495,20 @@
     const loadMoreBtn = dom.discussionsList.querySelector(".sidebar-load-more");
     if (loadMoreBtn) loadMoreBtn.remove();
 
-    if (!data.conversations.length && !state.discussionsItems.length) {
+    if (!data.conversations.length && !dom.discussionsList.children.length) {
       dom.discussionsList.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.empty_history") }));
       return;
     }
 
     data.conversations.forEach((conversation) => {
-      state.discussionsItems.push(conversation);
       dom.discussionsList.appendChild(renderConversationItem(conversation));
     });
 
     if (data.conversations.length === 20) {
       state.discussionsCursor = data.conversations[data.conversations.length - 1].updatedAt;
-      const btn = el("button", {
-        class: "sidebar-load-more",
-        text: t("workspace.load_more"),
-        onclick: () => loadDiscussions(false),
-      });
-      dom.discussionsList.appendChild(btn);
+      dom.discussionsList.appendChild(
+        el("button", { class: "sidebar-load-more", text: t("workspace.load_more"), onclick: () => loadDiscussions(false) })
+      );
     }
   }
 
@@ -326,8 +516,11 @@
     const item = el("div", { class: "sidebar-item", "data-conversation-id": conversation.id });
     if (conversation.id === state.conversationId) item.classList.add("active");
     const main = el("div", { class: "sidebar-item-main" }, [
-      el("div", { class: "sidebar-item-title", text: conversation.title || t("workspace.new_discussion") }),
-      el("div", { class: "sidebar-item-meta", text: `${conversation.createdByName} • ${formatDate(conversation.updatedAt)}` }),
+      avatarNode("sidebar-item-avatar", conversation.createdByAvatarUrl, conversation.createdByName),
+      el("div", { class: "sidebar-item-text" }, [
+        el("div", { class: "sidebar-item-title", text: conversation.title || t("workspace.new_discussion") }),
+        el("div", { class: "sidebar-item-meta", text: `${conversation.createdByName} • ${formatDate(conversation.updatedAt)}` }),
+      ]),
     ]);
     const menuBtn = el("button", {
       class: "sidebar-item-menu-btn",
@@ -350,14 +543,7 @@
   function openConversationMenu(conversation, anchorBtn) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open" });
-    menu.appendChild(
-      el("button", {
-        type: "button",
-        text: t("workspace.add_to_project"),
-        disabled: "disabled",
-        style: "font-weight:600;cursor:default;",
-      })
-    );
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_to_project") }));
     if (!state.projects.length) {
       menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_projects") }));
     } else {
@@ -379,11 +565,30 @@
         );
       });
     }
+    if (conversation.createdByUserId === state.user.id) {
+      menu.appendChild(el("div", { class: "menu-divider" }));
+      menu.appendChild(
+        el("button", {
+          type: "button",
+          class: "danger-text",
+          text: t("workspace.delete_conversation"),
+          onclick: (event) => {
+            event.stopPropagation();
+            closeContextMenu();
+            showConfirmModal(t("workspace.confirm_delete_conversation"), async () => {
+              const { ok } = await api(`/conversations/${conversation.id}`, { method: "DELETE" });
+              if (ok) {
+                if (state.conversationId === conversation.id) startNewDiscussion();
+                loadDiscussions(true);
+              }
+            });
+          },
+        })
+      );
+    }
     anchorBtn.parentElement.appendChild(menu);
     activeContextMenu = menu;
-    setTimeout(() => {
-      document.addEventListener("click", closeContextMenu, { once: true });
-    }, 0);
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   function closeContextMenu() {
@@ -410,17 +615,19 @@
     if (!ok || !data.ok) return;
     state.conversationId = conversationId;
     state.conversationTitle = data.conversation.title;
+    dom.centralColumn.classList.remove("is-empty");
     dom.conversationArea.innerHTML = "";
     data.messages.forEach((message) => renderMessage(message));
     scrollToBottom();
     document.querySelectorAll(".sidebar-item").forEach((n) => {
       n.classList.toggle("active", n.getAttribute("data-conversation-id") === conversationId);
     });
-    dom.sidebar.classList.remove("mobile-open");
+    dom.sidebarColumn.classList.remove("mobile-open");
     dom.backdrop.classList.remove("visible");
   }
 
   function renderInitialQuestion() {
+    dom.centralColumn.classList.add("is-empty");
     dom.conversationArea.innerHTML = "";
     const heading = el("div", { class: "initial-question" });
     const span = el("span", {});
@@ -461,12 +668,21 @@
     const row = el("div", { class: `message-row ${message.role}` });
     const bubble = el("div", { class: "message-bubble" });
     if (message.role === "assistant") {
-      bubble.appendChild(el("div", { class: "message-author", text: message.authorName }));
+      bubble.appendChild(el("div", { class: "message-author" }, [message.authorName]));
+    } else {
+      bubble.appendChild(
+        el("div", { class: "message-author" }, [
+          avatarNode("message-author-avatar", message.authorAvatarUrl, message.authorName),
+          message.authorName,
+        ])
+      );
     }
     if (message.blocks && message.blocks.length) {
       renderBlocks(bubble, message.blocks);
     } else if (message.content) {
-      bubble.appendChild(el("div", { class: "block-markdown", html: null, text: message.content }));
+      const textDiv = el("div", { class: "block-markdown" });
+      textDiv.textContent = message.content;
+      bubble.appendChild(textDiv);
     }
     if (message.attachments && message.attachments.length) {
       const attWrap = el("div", { class: "message-attachments" });
@@ -613,8 +829,6 @@
       tension: 0.25,
     }));
 
-    // Chart.js est charge de facon asynchrone (CDN) ; on differe la creation
-    // au prochain tick pour etre sur que le canvas est bien dans le DOM.
     setTimeout(() => {
       try {
         new window.Chart(canvas.getContext("2d"), {
@@ -633,8 +847,7 @@
           },
         });
       } catch (error) {
-        /* rendu impossible : le fallback textuel [bloc non supporte] n'est
-           pas declenche ici, mais l'erreur ne casse pas le reste de la page */
+        /* le canvas reste vide plutot que de casser le reste de la reponse */
       }
     }, 0);
 
@@ -642,7 +855,7 @@
   }
 
   // ---------------------------------------------------------------------
-  // Composer : modele, actions, fichiers, drag & drop, envoi
+  // Composer : modele, widgets d'actions, fichiers, drag & drop, envoi
   // ---------------------------------------------------------------------
 
   function resetComposer() {
@@ -650,8 +863,9 @@
     autoResize();
     state.attachments = [];
     state.sourceResultIds = [];
-    state.selectedAction = null;
+    state.selectedWidgetIndex = null;
     renderFileChips();
+    renderActionWidgets();
   }
 
   function autoResize() {
@@ -665,42 +879,26 @@
         state.model = btn.getAttribute("data-model");
         dom.modelButtons.forEach((b) => b.classList.toggle("active", b === btn));
         dom.sendBtn.classList.toggle("model-claude", state.model === "claude");
+        dom.sendBtn.classList.toggle("model-chatgpt", state.model === "chatgpt");
       });
     });
   }
 
-  async function loadActions() {
-    const { ok, data } = await api("/actions");
-    if (ok && data.ok) {
-      state.actionsCatalog = data.actions;
-      renderActionsMenu();
-    }
-  }
-
-  function renderActionsMenu() {
-    dom.actionsMenu.innerHTML = "";
-    state.actionsCatalog.forEach((actionId) => {
-      dom.actionsMenu.appendChild(
+  function renderActionWidgets() {
+    dom.actionWidgets.innerHTML = "";
+    ACTION_WIDGETS.forEach((widget, index) => {
+      dom.actionWidgets.appendChild(
         el("button", {
           type: "button",
-          text: t(`workspace.action_${actionId}`),
-          onclick: (event) => {
-            event.stopPropagation();
-            state.selectedAction = actionId;
-            dom.actionsMenu.classList.remove("open");
-            dom.actionsBtn.textContent = `${t("workspace.actions_label")}: ${t(`workspace.action_${actionId}`)}`;
+          class: `action-widget-btn${state.selectedWidgetIndex === index ? " active" : ""}`,
+          text: widget.label,
+          onclick: () => {
+            state.selectedWidgetIndex = state.selectedWidgetIndex === index ? null : index;
+            renderActionWidgets();
           },
         })
       );
     });
-  }
-
-  function wireActionsMenu() {
-    dom.actionsBtn.addEventListener("click", (event) => {
-      event.stopPropagation();
-      dom.actionsMenu.classList.toggle("open");
-    });
-    document.addEventListener("click", () => dom.actionsMenu.classList.remove("open"));
   }
 
   function renderFileChips() {
@@ -782,10 +980,11 @@
       showComposerError(t("workspace.error_empty_message"));
       return;
     }
-    if (stillUploading) return; // le bouton est deja desactive dans ce cas
+    if (stillUploading) return;
 
     state.sending = true;
     updateSendButtonState();
+    dom.centralColumn.classList.remove("is-empty");
 
     if (!state.conversationId) {
       dom.conversationArea.innerHTML = "";
@@ -793,7 +992,8 @@
 
     const userMessageRow = renderMessage({
       role: "user",
-      authorName: state.user.username,
+      authorName: state.user.displayName,
+      authorAvatarUrl: state.user.avatarUrl,
       content: text,
       blocks: null,
       attachments: readyAttachments.map((a) => ({ id: a.fileId, name: a.name })),
@@ -809,6 +1009,7 @@
     scrollToBottom();
 
     const requestId = uuid();
+    const widget = state.selectedWidgetIndex != null ? ACTION_WIDGETS[state.selectedWidgetIndex] : null;
     const payload = {
       conversationId: state.conversationId,
       model: state.model,
@@ -817,11 +1018,18 @@
       sourceResultIds: state.sourceResultIds,
       requestId,
     };
-    if (state.selectedAction) {
-      payload.action = { id: state.selectedAction, parameters: {} };
+    // widget.action.id est null tant qu'aucune vraie action n8n n'est
+    // branchee sur ce widget (voir ACTION_WIDGETS) : on n'envoie alors rien,
+    // plutot que d'envoyer une action que le backend rejetterait.
+    if (widget && widget.action && widget.action.id) {
+      payload.action = widget.action;
     }
 
-    const composerSnapshot = { text, attachments: state.attachments.slice(), action: state.selectedAction };
+    const composerSnapshot = {
+      text,
+      attachments: state.attachments.slice(),
+      widgetIndex: state.selectedWidgetIndex,
+    };
     resetComposer();
 
     const { ok, data } = await api("/messages", { method: "POST", body: JSON.stringify(payload) });
@@ -841,9 +1049,10 @@
           onclick: () => {
             statusRow.remove();
             state.attachments = composerSnapshot.attachments;
-            state.selectedAction = composerSnapshot.action;
+            state.selectedWidgetIndex = composerSnapshot.widgetIndex;
             dom.composerTextarea.value = composerSnapshot.text;
             renderFileChips();
+            renderActionWidgets();
             sendMessage();
           },
         }),
@@ -856,10 +1065,8 @@
     if (data.isNewConversation) {
       state.conversationId = data.conversationId;
       state.conversationTitle = data.conversationTitle;
-      loadDiscussions(true);
-    } else {
-      loadDiscussions(true);
     }
+    loadDiscussions(true);
 
     renderMessage(data.assistantMessage);
     scrollToBottom();
@@ -895,9 +1102,9 @@
     if (!authed) return;
 
     wireProfileMenu();
+    wireModal();
     initSidebarToggle();
     wireModelSelector();
-    wireActionsMenu();
     wireFileUpload();
     wireComposer();
 
@@ -914,13 +1121,11 @@
     dom.projectsHeader.addEventListener("click", () => toggleSection(dom.projectsSection));
     dom.newDiscussionBtn.addEventListener("click", startNewDiscussion);
 
-    await Promise.all([loadProjects(), loadDiscussions(true), loadActions()]);
+    renderActionWidgets();
+
+    await Promise.all([loadProjects(), loadDiscussions(true)]);
 
     renderInitialQuestion();
-
-    document.addEventListener("agentstage:langchange", () => {
-      dom.sendBtn.setAttribute("aria-label", t("workspace.send"));
-    });
   }
 
   document.addEventListener("DOMContentLoaded", init);

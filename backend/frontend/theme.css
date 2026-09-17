@@ -26,12 +26,10 @@
   --radius-medium: 10px;
   --radius-large: 16px;
 
-  --model-chatgpt-color: #1a1a1a;
   --model-claude-color: #d97706;
 }
 
 :root[data-theme="dark"] {
-  --model-chatgpt-color: #ffffff;
   --color-bg: #121212;
   --color-text: #f2f2f2;
   --color-topbar-bg: #1e1e1e;

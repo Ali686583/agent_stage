@@ -1,7 +1,12 @@
 /* ===== Espace collaboratif IA (page apres connexion) =====
    S'appuie sur les variables de theme.css (couleurs + rayons). Toutes les
    valeurs de position laterale utilisent des proprietes logiques
-   (inset-inline-*, margin-inline-*) pour rester correctes en RTL (arabe). */
+   (inset-inline-*, margin-inline-*) pour rester correctes en RTL (arabe).
+   Le centrage du contenu central repose entierement sur Flexbox (aucun
+   offset fixe) : quand la sidebar change de largeur, .workspace-main
+   (flex:1) recalcule automatiquement l'espace disponible et tout ce qui
+   est centre dedans (padding en clamp()) se recentre avec la meme
+   transition, sans code JS dedie. */
 
 * { box-sizing: border-box; }
 
@@ -25,6 +30,15 @@ html, body {
    Sidebar
 --------------------------------------------------------------------- */
 
+/* Conteneur sans overflow:hidden : l'encoche (enfant positionne en
+   inset-inline-start:100%) ne doit jamais etre rognee par le clip de la
+   sidebar elle-meme. */
+.sidebar-column {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+}
+
 .workspace-sidebar {
   width: 280px;
   flex-shrink: 0;
@@ -34,7 +48,6 @@ html, body {
   flex-direction: column;
   overflow: hidden;
   transition: width 0.2s ease;
-  position: relative;
 }
 .workspace-sidebar.collapsed { width: 0; border-inline-end: 0; }
 
@@ -47,13 +60,15 @@ html, body {
   overflow-y: auto;
 }
 
+/* Petite encoche/languette sur le bord droit, angles arrondis, une simple
+   fleche a l'interieur - jamais un gros bouton rond ni flottant. */
 .sidebar-notch {
   position: absolute;
   top: 50%;
   inset-inline-start: 100%;
   transform: translateY(-50%);
-  width: 22px;
-  height: 46px;
+  width: 20px;
+  height: 44px;
   background: var(--color-topbar-bg);
   border: 1px solid var(--color-border);
   border-inline-start: 0;
@@ -64,14 +79,11 @@ html, body {
   cursor: pointer;
   color: var(--color-text);
   z-index: 5;
+  transition: inset-inline-start 0.2s ease;
 }
-:root[dir="rtl"] .sidebar-notch {
-  border-radius: 999px 0 0 999px;
-  border-inline-start: 1px solid var(--color-border);
-  border-inline-end: 0;
-}
-.sidebar-notch svg { width: 14px; height: 14px; transition: transform 0.2s ease; }
-.workspace-sidebar.collapsed .sidebar-notch svg { transform: rotate(180deg); }
+:root[dir="rtl"] .sidebar-notch { border-radius: 999px 0 0 999px; }
+.sidebar-notch svg { width: 13px; height: 13px; transition: transform 0.2s ease; }
+.workspace-sidebar.collapsed ~ .sidebar-notch svg { transform: rotate(180deg); }
 
 .sidebar-section { margin-bottom: 4px; }
 .sidebar-section-header {
@@ -167,7 +179,16 @@ html, body {
   font-size: 0.85rem;
 }
 .sidebar-item:hover, .sidebar-item.active { background: var(--color-accent-soft-bg); }
-.sidebar-item-main { overflow: hidden; }
+.sidebar-item-avatar {
+  width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+  object-fit: cover;
+  background: var(--color-accent);
+  color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.68rem; font-weight: 700;
+}
+.sidebar-item-main { overflow: hidden; display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; }
+.sidebar-item-text { overflow: hidden; min-width: 0; }
 .sidebar-item-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-item-meta { font-size: 0.74rem; color: var(--color-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-item-menu-btn {
@@ -202,7 +223,7 @@ html, body {
 
 .sidebar-empty { font-size: 0.8rem; color: var(--color-muted); padding: 6px 10px; }
 
-/* Menu contextuel "..." (ajouter a un projet) */
+/* Menu contextuel "..." (conversations et projets) */
 .item-context-menu {
   position: absolute;
   top: 100%;
@@ -230,6 +251,13 @@ html, body {
   cursor: pointer;
 }
 .item-context-menu button:hover { background: var(--color-accent-soft-bg); }
+.item-context-menu button.danger-text { color: var(--color-error); }
+.item-context-menu .menu-label {
+  font-weight: 600;
+  cursor: default;
+  color: var(--color-muted);
+}
+.item-context-menu .menu-label:hover { background: none; }
 .item-context-menu .menu-divider { height: 1px; background: var(--color-border-light); margin: 4px 2px; }
 
 /* ---------------------------------------------------------------------
@@ -252,24 +280,35 @@ html, body {
   background: var(--color-topbar-bg);
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
+  position: relative;
 }
 .workspace-topbar .brand { display: flex; align-items: center; gap: 12px; }
 .workspace-topbar .brand-logo { height: 36px; width: auto; display: block; }
 .workspace-topbar .top-controls { display: flex; align-items: center; gap: 10px; }
 
-.conversation-area {
+/* Colonne centrale : gere elle-meme le centrage vertical du groupe
+   [question + entry + widgets] en etat vide, et le mode "scroll + entry
+   ancree en bas" des qu'il y a des messages. Purement Flex, pas d'offset
+   fixe : voir commentaire en tete de fichier. */
+.central-column {
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+.central-column.is-empty { justify-content: center; }
+
+.conversation-area {
   overflow-y: auto;
-  padding: 24px clamp(16px, 8vw, 22%);
+  padding: 24px clamp(16px, 8vw, 20%);
   display: flex;
   flex-direction: column;
 }
+.central-column:not(.is-empty) .conversation-area { flex: 1 1 auto; }
+.central-column.is-empty .conversation-area { flex: 0 0 auto; padding-bottom: 0; }
 
 .initial-question {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   font-size: 1.6rem;
   font-weight: 600;
   color: var(--color-text);
@@ -305,9 +344,15 @@ html, body {
   max-width: 88%;
 }
 .message-author {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.74rem;
   color: var(--color-muted);
   margin-bottom: 4px;
+}
+.message-author-avatar {
+  width: 18px; height: 18px; border-radius: 50%; object-fit: cover;
 }
 
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -403,13 +448,14 @@ html, body {
 }
 
 /* ---------------------------------------------------------------------
-   Entry (composer)
+   Entry (composer) + widgets d'actions
 --------------------------------------------------------------------- */
 
 .composer-wrap {
   flex-shrink: 0;
-  padding: 12px clamp(16px, 8vw, 22%) 18px;
+  padding: 0 clamp(16px, 8vw, 20%) 18px;
 }
+.central-column.is-empty .composer-wrap { padding-top: 18px; }
 
 .composer {
   border: 1px solid var(--color-border);
@@ -500,24 +546,7 @@ html, body {
 }
 .composer textarea::placeholder { color: var(--color-placeholder); }
 
-.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.composer-actions-left { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-
-.action-menu-wrap { position: relative; }
-.actions-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 10px;
-  border-radius: var(--radius-medium);
-  border: 1px solid var(--color-border);
-  background: var(--color-bg);
-  color: var(--color-text);
-  font-size: 0.8rem;
-  cursor: pointer;
-}
-.actions-btn:hover { background: var(--color-accent-soft-bg); }
-
+.composer-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .composer-actions-right { display: flex; gap: 8px; align-items: center; }
 .icon-btn {
   display: flex;
@@ -534,11 +563,65 @@ html, body {
 .icon-btn:hover { background: var(--color-accent-soft-bg); }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-.send-btn svg { stroke: var(--model-chatgpt-color); }
-.send-btn.model-claude svg { stroke: var(--model-claude-color); }
+/* Bouton d'envoi : petit carre aux angles arrondis, c'est le FOND qui
+   indique le modele selectionne (pas seulement la fleche). */
+.send-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-medium);
+  border: 0;
+  cursor: pointer;
+  background: #000000;
+  color: #ffffff;
+  transition: background-color 0.15s ease;
+}
+.send-btn svg { stroke: currentColor; }
+.send-btn:hover { opacity: 0.85; }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ChatGPT : noir/blanche en clair, blanc/noire en sombre */
+:root[data-theme="dark"] .send-btn.model-chatgpt { background: #ffffff; color: #1a1a1a; }
+
+/* Claude : fond orange dans les deux themes, fleche sombre pour un
+   contraste net sur cet orange precis. */
+.send-btn.model-claude { background: var(--model-claude-color); color: #1a1a1a; }
+
+/* Widgets d'actions : de vrais boutons independants, jamais un menu
+   deroulant. Structure prete pour label/icon/action.id/type/parameters
+   (voir ACTION_WIDGETS dans workspace.js). */
+.action-widgets-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+  padding-top: 10px;
+}
+.action-widget-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: var(--radius-medium);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.84rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.action-widget-btn:hover { background: var(--color-accent-soft-bg); }
+.action-widget-btn.active {
+  background: var(--color-accent-soft-bg);
+  border-color: var(--color-accent);
+  color: var(--color-accent-text);
+}
 
 /* ---------------------------------------------------------------------
-   Profil (reutilise le pattern avatar + dropdown de MyBusiness)
+   Profil (avatar + dropdown, pattern MyBusiness) + "Plus d'options"
 --------------------------------------------------------------------- */
 
 .profile-wrap { position: relative; }
@@ -554,7 +637,7 @@ html, body {
   color: var(--color-text);
 }
 .profile-trigger:hover { background: var(--color-accent-soft-bg); }
-.profile-trigger .avatar {
+.avatar {
   width: 32px;
   height: 32px;
   border-radius: 50%;
@@ -566,14 +649,18 @@ html, body {
   font-weight: 700;
   font-size: 0.85rem;
   flex-shrink: 0;
+  object-fit: cover;
+  overflow: hidden;
 }
+.avatar.avatar-lg { width: 44px; height: 44px; font-size: 1.05rem; }
 .profile-name { font-size: 0.85rem; font-weight: 600; }
 
 .profile-menu {
   position: absolute;
   top: calc(100% + 8px);
   inset-inline-end: 0;
-  width: 220px;
+  width: 240px;
+  max-width: calc(100vw - 32px);
   background: var(--color-bg);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-medium);
@@ -583,8 +670,24 @@ html, body {
   display: none;
 }
 .profile-menu.open { display: block; }
-.profile-menu-name { font-weight: 700; font-size: 0.9rem; }
-.profile-menu-email { font-size: 0.78rem; color: var(--color-muted); margin-bottom: 10px; word-break: break-all; }
+.profile-menu-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.profile-menu-identity { min-width: 0; flex: 1; }
+.profile-menu-name {
+  font-weight: 700;
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* L'email ne doit jamais deborder du menu : une seule ligne, tronque avec
+   ellipsis plutot que d'elargir le menu ou de passer a la ligne. */
+.profile-menu-email {
+  font-size: 0.78rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .profile-menu button.logout-btn {
   width: 100%;
   padding: 8px 10px;
@@ -597,6 +700,112 @@ html, body {
   font-size: 0.84rem;
 }
 .profile-menu button.logout-btn:hover { background: var(--color-error); color: #fff; }
+
+.more-options-row { display: flex; justify-content: flex-end; margin-top: 8px; }
+.more-options-btn {
+  border: 0;
+  background: none;
+  color: var(--color-accent-text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 6px 8px;
+  border-radius: var(--radius-small);
+}
+.more-options-btn:hover { background: var(--color-accent-soft-bg); }
+
+.more-options-panel {
+  margin-top: 6px;
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.more-options-panel button {
+  text-align: start;
+  padding: 8px 8px;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 0.84rem;
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+.more-options-panel button:hover { background: var(--color-accent-soft-bg); }
+.more-options-panel button.danger-text { color: var(--color-error); }
+.more-options-panel button.danger-text:hover { background: var(--color-error); color: #fff; }
+
+.nickname-form {
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border-light);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.nickname-form input {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 7px 10px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--color-border);
+  background: var(--color-input-bg);
+  color: var(--color-text);
+}
+.link-btn {
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 4px;
+  text-align: start;
+}
+
+/* ---------------------------------------------------------------------
+   Modale de confirmation (suppression conversation / projet / compte)
+--------------------------------------------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 16px;
+}
+.modal-box {
+  background: var(--color-bg);
+  border-radius: var(--radius-large);
+  padding: 22px;
+  width: 100%;
+  max-width: 380px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+}
+.modal-message {
+  font-size: 0.95rem;
+  color: var(--color-text);
+  margin-bottom: 18px;
+  line-height: 1.5;
+}
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
+.modal-btn {
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius-medium);
+  cursor: pointer;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
+.modal-btn.danger { background: var(--color-error); border-color: var(--color-error); color: #fff; }
 
 .disclosure-banner {
   font-size: 0.76rem;
@@ -612,25 +821,24 @@ html, body {
 --------------------------------------------------------------------- */
 
 @media (max-width: 900px) {
-  .workspace-sidebar {
+  .sidebar-column {
     position: fixed;
     top: 0;
     inset-inline-start: 0;
     height: 100%;
     z-index: 40;
     transform: translateX(-100%);
-    width: 280px;
+    transition: transform 0.2s ease;
   }
-  :root[dir="rtl"] .workspace-sidebar { transform: translateX(100%); }
-  .workspace-sidebar.mobile-open { transform: translateX(0); }
-  .workspace-sidebar.collapsed { width: 280px; }
+  :root[dir="rtl"] .sidebar-column { transform: translateX(100%); }
+  .sidebar-column.mobile-open { transform: translateX(0); }
   .sidebar-notch { display: none; }
   .mobile-sidebar-toggle { display: flex !important; }
   .sidebar-backdrop {
     position: fixed; inset: 0; background: rgba(0,0,0,0.4); z-index: 35; display: none;
   }
   .sidebar-backdrop.visible { display: block; }
-  .conversation-area, .composer-wrap { padding-inline: 16px; }
+  .conversation-area, .composer-wrap, .disclosure-banner { padding-inline: 16px; }
 }
 
 .mobile-sidebar-toggle {
