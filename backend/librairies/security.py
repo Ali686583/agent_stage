@@ -14,12 +14,16 @@ n'est necessaire (contrairement a l'ancien schema PBKDF2 de MyBusiness).
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 import secrets
 
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHash
 
 _hasher = PasswordHasher()
+
+FILE_SIGNING_SECRET = os.environ.get("FILE_SIGNING_SECRET", "")
 
 
 def hash_password(password: str) -> str:
@@ -53,3 +57,14 @@ def hash_token(token: str) -> str:
     permette pas de rejouer une session ou une reinitialisation.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def sign_file_token(file_id: str, expires_at: int) -> str:
+    """Partagee entre le process web (workspace_routes.py, pour construire ET
+    verifier le lien) et le worker en arriere-plan (librairies/jobs.py, pour
+    construire le lien transmis a n8n) : les deux doivent produire exactement
+    la meme signature a partir du meme secret."""
+    if not FILE_SIGNING_SECRET:
+        raise RuntimeError("FILE_SIGNING_SECRET n'est pas configuree.")
+    message = f"{file_id}:{expires_at}".encode("utf-8")
+    return hmac.new(FILE_SIGNING_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()

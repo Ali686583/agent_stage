@@ -19,7 +19,6 @@ le corps de la requete.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import mimetypes
@@ -27,27 +26,19 @@ import os
 import time
 import uuid
 
-import requests
 from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
 
 from librairies import database, realtime, workspace
+from librairies.jobs import execute_workflow_run, queue
 from librairies.rate_limit import limiter
-from librairies.security import hash_token
+from librairies.security import hash_token, sign_file_token
 
 SESSION_COOKIE_NAME = "agent_stage_session"
 
 UPLOAD_DIR = os.environ.get("UPLOAD_DIR", "/data/uploads")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 MAX_FILES_PER_MESSAGE = int(os.environ.get("MAX_FILES_PER_MESSAGE", "5"))
-FILE_SIGNING_SECRET = os.environ.get("FILE_SIGNING_SECRET", "")
 FILE_LINK_TTL_SECONDS = int(os.environ.get("FILE_LINK_TTL_SECONDS", "600"))
-
-# Deux webhooks distincts (un par modele) : chacun peut etre construit comme
-# un workflow n8n independant et simple, plutot qu'un seul workflow qui
-# devrait brancher lui-meme sur le modele.
-N8N_WEBHOOK_CHATGPT_URL = os.environ.get("N8N_WEBHOOK_CHATGPT_URL", "")
-N8N_WEBHOOK_CLAUDE_URL = os.environ.get("N8N_WEBHOOK_CLAUDE_URL", "")
-N8N_WEBHOOK_SECRET = os.environ.get("N8N_WEBHOOK_SECRET", "")
 N8N_TIMEOUT_SECONDS = int(os.environ.get("N8N_TIMEOUT_SECONDS", "90"))
 
 ALLOWED_MIME_TYPES = {
@@ -101,13 +92,6 @@ def _require_user():
     if not user:
         return None, _error(401, "Non authentifie.")
     return user, None
-
-
-def _sign_file_token(file_id: str, expires_at: int) -> str:
-    if not FILE_SIGNING_SECRET:
-        raise RuntimeError("FILE_SIGNING_SECRET n'est pas configuree.")
-    message = f"{file_id}:{expires_at}".encode("utf-8")
-    return hmac.new(FILE_SIGNING_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def _safe_storage_name(file_id: str, original_name: str) -> str:
@@ -546,7 +530,7 @@ def download_file_signed_route(file_id):
     if int(time.time()) > expires_at:
         return _error(410, "Lien expire.")
     try:
-        expected = _sign_file_token(file_id, expires_at)
+        expected = sign_file_token(file_id, expires_at)
     except RuntimeError:
         return _error(503, "Signature de fichiers non configuree.")
     if not hmac.compare_digest(expected, token):
@@ -662,86 +646,25 @@ def send_message_route():
             return _error(409, "Cette requete est deja en cours de traitement.")
         run_id = run["id"]
 
-    webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
-    if not webhook_url:
-        workspace.complete_workflow_run(run_id, status="failed", error="workflow_not_configured")
-        return _error(503, f"Le workflow n8n pour {model} n'est pas encore configure.")
-
-    file_links = []
-    for file_id in file_ids:
-        expires_at = int(time.time()) + FILE_LINK_TTL_SECONDS
-        try:
-            token = _sign_file_token(file_id, expires_at)
-        except RuntimeError:
-            workspace.complete_workflow_run(run_id, status="failed", error="file_signing_not_configured")
-            return _error(503, "Signature de fichiers non configuree.")
-        file_links.append(
-            {
-                "fileId": file_id,
-                "url": f"{request.url_root.rstrip('/')}/api/workspace/files/{file_id}/signed?exp={expires_at}&token={token}",
-            }
-        )
-
-    payload = {
-        "requestId": request_id,
-        "conversationId": conversation_id,
-        "userId": user["id"],
-        "userName": user["displayName"],
-        "model": model,
-        "message": message_text,
-        "fileIds": file_ids,
-        "files": file_links,
-        "sourceResultIds": source_result_ids,
-        "action": {"id": action_id, "type": action_id, "parameters": action_parameters} if action_id else None,
-    }
-
-    try:
-        n8n_response = requests.post(
-            webhook_url,
-            json=payload,
-            headers={"X-Agent-Stage-Secret": N8N_WEBHOOK_SECRET},
-            timeout=N8N_TIMEOUT_SECONDS,
-        )
-        n8n_response.raise_for_status()
-        n8n_data = n8n_response.json()
-    except requests.exceptions.Timeout:
-        workspace.complete_workflow_run(run_id, status="timeout", error="n8n timeout")
-        return _error(504, "Le workflow n'a pas repondu a temps.")
-    except Exception as exc:
-        workspace.complete_workflow_run(run_id, status="failed", error=str(exc)[:500])
-        return _error(502, "Le workflow a echoue.")
-
-    blocks = n8n_data.get("blocks")
-    if not isinstance(blocks, list) or not blocks:
-        workspace.complete_workflow_run(run_id, status="failed", error="empty_response")
-        return _error(502, "Reponse vide du workflow.")
-
-    result = workspace.create_result(
-        conversation_id=conversation_id,
-        message_id=user_message["id"],
-        user_id=user["id"],
-        model=model,
-        workflow_type=action_id or model,
-        request=payload,
-        response={"blocks": blocks},
-        source_result_ids=source_result_ids,
-        metadata=n8n_data.get("metadata"),
-    )
-
-    assistant_message = workspace.add_message(
-        conversation_id=conversation_id,
-        user_id=None,
-        author_name="ChatGPT" if model == "chatgpt" else "Claude",
-        role="assistant",
-        content=str(n8n_data.get("summary", ""))[:2000],
-        blocks=blocks,
-        model=model,
-        action_id=action_id,
-        result_id=result["id"],
-    )
-    workspace.touch_conversation(conversation_id)
-    workspace.complete_workflow_run(
-        run_id, status="completed", result_id=result["id"], n8n_execution_id=n8n_data.get("executionId")
+    # Phase 4 : l'appel n8n (potentiellement lent, jusqu'a N8N_TIMEOUT_SECONDS)
+    # ne se fait plus ici. On met en file et on repond tout de suite ; le
+    # worker (librairies/jobs.py) persiste le resultat et pousse la reponse
+    # via SSE (voir realtime.py) quand elle est prete.
+    queue.enqueue(
+        execute_workflow_run,
+        run_id,
+        conversation_id,
+        user_message["id"],
+        user["id"],
+        user["displayName"],
+        model,
+        action_id,
+        action_parameters,
+        message_text,
+        file_ids,
+        source_result_ids,
+        request_id,
+        job_timeout=N8N_TIMEOUT_SECONDS + 30,
     )
 
     return jsonify(
@@ -750,6 +673,6 @@ def send_message_route():
         isNewConversation=is_new_conversation,
         conversationTitle=conversation["title"],
         userMessage=user_message,
-        assistantMessage=assistant_message,
-        resultId=result["id"],
+        requestId=request_id,
+        queued=True,
     )

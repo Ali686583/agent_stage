@@ -472,6 +472,7 @@ def add_message(
     model: str | None = None,
     action_id: str | None = None,
     result_id: str | None = None,
+    publish_extra: dict | None = None,
 ) -> dict:
     message_id = new_id("msg")
     with _db() as conn:
@@ -494,13 +495,26 @@ def add_message(
         )
     created = get_message(message_id)
     try:
-        realtime.publish_event(conversation_id, "message.created", created)
+        # publish_extra (ex. requestId) n'est ajoute qu'a l'evenement temps
+        # reel, jamais persiste : sert uniquement au frontend a rattacher la
+        # reponse asynchrone a la bonne requete en attente (Phase 4).
+        event_payload = dict(created, **publish_extra) if publish_extra else created
+        realtime.publish_event(conversation_id, "message.created", event_payload)
     except Exception:
         # Best-effort : le message est deja persiste en Postgres (source de
         # verite) ; un Redis indisponible ne doit jamais faire echouer
         # l'envoi, seul le push temps reel est perdu (rattrapable via seq).
         _logger.warning("publish_event a echoue pour la conversation %s", conversation_id, exc_info=True)
     return created
+
+
+def publish_workflow_failed(conversation_id: str, request_id: str, message_id: str, error: str) -> None:
+    """Evenement ephemere (jamais persiste) : previent les clients connectes
+    qu'une demande en attente a echoue, pour qu'ils resolvent leur indicateur
+    de chargement au lieu d'attendre indefiniment. Voir librairies/jobs.py."""
+    realtime.publish_event(
+        conversation_id, "workflow.failed", {"requestId": request_id, "messageId": message_id, "error": error}
+    )
 
 
 _MESSAGE_SELECT = """

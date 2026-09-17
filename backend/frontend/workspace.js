@@ -36,6 +36,7 @@
     lastSeenSeq: 0,
     typingUsers: new Map(), // userId -> { displayName, avatarUrl, timeoutId }
     lastTypingPingAt: 0,
+    pendingRequests: new Map(), // requestId -> { loadingRow, showSendError } (Phase 4, reponses asynchrones)
   };
 
   // ---------------------------------------------------------------------
@@ -771,6 +772,14 @@
       } catch (error) {
         return;
       }
+      // Phase 4 : resout la requete en attente correspondante (retire son
+      // loader) avant tout, qu'elle vienne de ce meme onglet ou d'un autre
+      // (message.requestId n'est present que sur les reponses assistant
+      // issues du worker en arriere-plan, voir librairies/jobs.py).
+      if (message.requestId && state.pendingRequests.has(message.requestId)) {
+        state.pendingRequests.get(message.requestId).loadingRow.remove();
+        state.pendingRequests.delete(message.requestId);
+      }
       if (state.seenMessageIds.has(message.id)) return; // deja rendu localement (propre envoi) ou deja vu
       state.seenMessageIds.add(message.id);
       if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
@@ -793,6 +802,20 @@
       }
       if (!data.userId || data.userId === state.user.id) return; // jamais son propre indicateur
       upsertTypingIndicator(data.userId, data.displayName, data.avatarUrl);
+    });
+
+    source.addEventListener("workflow.failed", (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      const pending = data.requestId && state.pendingRequests.get(data.requestId);
+      if (!pending) return; // echec d'une requete d'un autre onglet/utilisateur : rien a faire ici
+      state.pendingRequests.delete(data.requestId);
+      const statusMap = { n8n_timeout: "workspace.error_timeout", workflow_not_configured: "workspace.error_not_configured" };
+      pending.showSendError(t(statusMap[data.error] || "workspace.error_generic"));
     });
 
     state.eventSource = source;
@@ -1325,13 +1348,11 @@
 
     const { ok, data } = await api("/messages", { method: "POST", body: JSON.stringify(payload) });
 
-    loadingRow.remove();
     state.sending = false;
     updateSendButtonState();
 
-    if (!ok || !data.ok) {
-      const statusMap = { 504: "workspace.error_timeout", 503: "workspace.error_not_configured" };
-      const message = statusMap[data.status] ? t(statusMap[data.status]) : data.error ? data.error : t("workspace.error_generic");
+    function showSendError(message) {
+      loadingRow.remove();
       const statusRow = el("div", { class: "message-status error" }, [
         el("span", { text: message }),
         el("button", {
@@ -1350,6 +1371,19 @@
       ]);
       userMessageRow.appendChild(statusRow);
       scrollToBottom();
+    }
+
+    if (!ok || !data.ok) {
+      const statusMap = { 504: "workspace.error_timeout", 503: "workspace.error_not_configured" };
+      showSendError(statusMap[data.status] ? t(statusMap[data.status]) : data.error ? data.error : t("workspace.error_generic"));
+      return;
+    }
+
+    if (data.replay) {
+      // Requete deja completee lors d'une tentative precedente (meme
+      // requestId rejoue) : sa reponse assistant a deja ete diffusee a
+      // l'epoque, rien de nouveau a attendre ici.
+      loadingRow.remove();
       return;
     }
 
@@ -1358,21 +1392,19 @@
       state.conversationTitle = data.conversationTitle;
       connectRealtime(state.conversationId); // pas encore connecte : cette conversation vient de naitre
     }
-    // Ces deux messages ont deja ete rendus localement (l'un ci-dessus de
-    // maniere optimiste, l'autre juste en-dessous) : les marquer vus evite
-    // de les re-afficher en double quand leur propre publication SSE revient.
+    // Deja rendu localement de maniere optimiste ci-dessus : le marquer vu
+    // evite de le re-afficher en double quand sa publication SSE revient.
     if (data.userMessage) {
       state.seenMessageIds.add(data.userMessage.id);
       if (data.userMessage.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, data.userMessage.seq);
     }
-    if (data.assistantMessage) {
-      state.seenMessageIds.add(data.assistantMessage.id);
-      if (data.assistantMessage.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, data.assistantMessage.seq);
-    }
     loadDiscussions(true);
 
-    renderMessage(data.assistantMessage);
-    scrollToBottom();
+    // Phase 4 : la reponse assistant est traitee en arriere-plan (appel n8n
+    // potentiellement long) et arrivera plus tard via SSE, jamais dans cette
+    // reponse HTTP. Le loader reste visible, rattache a cette requete : voir
+    // connectRealtime() pour sa resolution (message.created / workflow.failed).
+    state.pendingRequests.set(requestId, { loadingRow, showSendError });
   }
 
   function showComposerError(message) {
