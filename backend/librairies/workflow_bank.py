@@ -156,6 +156,9 @@ def _public_entry_action(row) -> dict:
         "actionName": row["action_name"],
         "actionStatus": row["action_status"],
         "position": row["position"],
+        # Permet au frontend de proposer "Ouvrir dans n8n" directement sur ce
+        # bouton, sans avoir a rechercher le workflow manuellement (spec Phase 5 §11).
+        "editorUrl": row.get("editor_url"),
     }
 
 
@@ -266,9 +269,11 @@ def list_entry_actions(context_id: str) -> list:
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status
+            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+                   wr.metadata->>'editorUrl' AS editor_url
             FROM entry_actions ea
             JOIN actions a ON a.id = ea.action_id
+            LEFT JOIN workflow_records wr ON wr.id = a.workflow_record_id
             WHERE ea.context_id = %s
             ORDER BY ea.position ASC, ea.created_at ASC;
             """,
@@ -282,8 +287,11 @@ def add_entry_action(context_id: str, action_id: str, created_by: str, alias: st
     with _db() as conn:
         existing = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status
-            FROM entry_actions ea JOIN actions a ON a.id = ea.action_id
+            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+                   wr.metadata->>'editorUrl' AS editor_url
+            FROM entry_actions ea
+            JOIN actions a ON a.id = ea.action_id
+            LEFT JOIN workflow_records wr ON wr.id = a.workflow_record_id
             WHERE ea.context_id = %s AND ea.action_id = %s;
             """,
             (context_id, action_id),
@@ -306,8 +314,11 @@ def add_entry_action(context_id: str, action_id: str, created_by: str, alias: st
         )
         row = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status
-            FROM entry_actions ea JOIN actions a ON a.id = ea.action_id
+            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+                   wr.metadata->>'editorUrl' AS editor_url
+            FROM entry_actions ea
+            JOIN actions a ON a.id = ea.action_id
+            LEFT JOIN workflow_records wr ON wr.id = a.workflow_record_id
             WHERE ea.id = %s;
             """,
             (entry_action_id,),

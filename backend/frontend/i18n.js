@@ -121,6 +121,7 @@
       "workspace.search_actions_placeholder": "Rechercher un bouton...",
       "workspace.no_actions_found": "Aucun bouton trouvé.",
       "workspace.rename": "Renommer",
+      "workspace.open_in_n8n": "Ouvrir dans n8n",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -235,6 +236,7 @@
       "workspace.search_actions_placeholder": "Search a button...",
       "workspace.no_actions_found": "No button found.",
       "workspace.rename": "Rename",
+      "workspace.open_in_n8n": "Open in n8n",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -349,6 +351,7 @@
       "workspace.search_actions_placeholder": "ابحث عن زر...",
       "workspace.no_actions_found": "لم يتم العثور على أي زر.",
       "workspace.rename": "إعادة تسمية",
+      "workspace.open_in_n8n": "فتح في n8n",
     },
   };
 

@@ -1254,6 +1254,24 @@
   function openActionWidgetMenu(entryAction, anchorBtn) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open align-start" });
+    if (entryAction.editorUrl) {
+      // Ouvre directement l'editeur du workflow n8n de cette action, sans
+      // avoir a le rechercher manuellement (spec Phase 5 : accès direct au
+      // workflow correspondant). Nouvel onglet : jamais de navigation qui
+      // ferait perdre la conversation en cours.
+      menu.appendChild(
+        el("button", {
+          type: "button",
+          text: t("workspace.open_in_n8n"),
+          onclick: (event) => {
+            event.stopPropagation();
+            closeContextMenu();
+            window.open(entryAction.editorUrl, "_blank", "noopener");
+          },
+        })
+      );
+      menu.appendChild(el("div", { class: "menu-divider" }));
+    }
     menu.appendChild(
       el("button", {
         type: "button",
