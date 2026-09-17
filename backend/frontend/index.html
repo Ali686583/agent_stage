@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>agent_stage</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
     * {
       margin: 0;
@@ -14,7 +15,7 @@
     html, body {
       width: 100%;
       height: 100%;
-      background: #ffffff;
+      background: var(--color-bg);
       overflow: hidden;
     }
 
@@ -37,6 +38,7 @@
     <img src="animation.gif" alt="animation">
   </div>
 
+  <script src="theme.js"></script>
   <script>
     // Durée du GIF (41 frames, ~6000ms), configuré pour ne jouer qu'une fois.
     const ANIMATION_DURATION_MS = 6000;

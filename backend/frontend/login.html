@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Connexion</title>
+  <link rel="stylesheet" href="theme.css">
   <style>
     /* ===== DESIGN PAGE CONNEXION — OCPAgentic ===== */
 
@@ -13,18 +14,18 @@
     body {
       margin: 0;
       min-height: 100vh;
-      background: #ffffff;
-      color: #1a1a1a;
+      background: var(--color-bg);
+      color: var(--color-text);
       display: flex;
       flex-direction: column;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
     }
 
-    /* Barre du haut : pleine largeur, vert du logo OCPAgentic */
+    /* Barre du haut */
     .top-frame {
       width: 100%;
       padding: 10px 20px;
-      background: #eaeaea;
+      background: var(--color-topbar-bg);
       display: flex;
       align-items: center;
     }
@@ -52,14 +53,14 @@
       max-width: 100%;
       font-size: 1.6rem;
       font-weight: 700;
-      color: #1a1a1a;
+      color: var(--color-text);
     }
 
     /* La frame (cadre) avec les champs */
     .auth-frame {
       width: 320px;
       max-width: 100%;
-      border: 1px solid #cfcfcf;
+      border: 1px solid var(--color-border);
       border-radius: 10px;
       padding: 20px;
       display: flex;
@@ -67,20 +68,22 @@
     }
     .auth-frame label {
       font-size: 0.9rem;
-      color: #333333;
+      color: var(--color-label);
       margin-bottom: 6px;
     }
     .auth-frame input {
       font: inherit;
       padding: 9px 11px;
-      border: 1px solid #cfcfcf;
+      border: 1px solid var(--color-border);
       border-radius: 6px;
       outline: none;
       margin-bottom: 14px;
+      background: var(--color-input-bg);
+      color: var(--color-text);
     }
     .auth-frame > *:last-child { margin-bottom: 0; }
-    .auth-frame input:focus { border-color: #1B7A3E; }
-    .auth-frame input::placeholder { color: #9aa0a6; }
+    .auth-frame input:focus { border-color: var(--color-accent-text); }
+    .auth-frame input::placeholder { color: var(--color-placeholder); }
 
     /* Champ mot de passe + bouton oeil a droite */
     .pass-wrap {
@@ -103,20 +106,20 @@
       padding: 4px;
       background: none;
       border: 0;
-      color: #777777;
+      color: var(--color-icon);
       cursor: pointer;
     }
-    .eye-btn:hover { color: #1a1a1a; }
+    .eye-btn:hover { color: var(--color-icon-hover); }
     .eye-btn .eye-on { display: none; }
     .eye-btn.showing .eye-off { display: none; }
     .eye-btn.showing .eye-on { display: block; }
 
-    /* Trait fin gris entre la frame et le bouton */
+    /* Trait fin entre la frame et le bouton */
     .sep {
       width: 320px;
       max-width: 100%;
       height: 1px;
-      background: #d9d9d9;
+      background: var(--color-border-light);
       border: 0;
       margin: 6px 0 0;
     }
@@ -124,7 +127,7 @@
     /* Petit "ou" */
     .or {
       font-size: 0.85rem;
-      color: #888888;
+      color: var(--color-muted);
     }
 
     /* Bouton principal "Se connecter" */
@@ -134,13 +137,13 @@
       font: inherit;
       font-weight: 600;
       color: #ffffff;
-      background: #6DB831;
+      background: var(--color-accent);
       border: 0;
       border-radius: 6px;
       padding: 11px 14px;
       cursor: pointer;
     }
-    .btn-login:hover { background: #5CA028; }
+    .btn-login:hover { background: var(--color-accent-hover); }
 
     /* Bouton secondaire "Creer un compte" */
     .btn-create {
@@ -148,20 +151,20 @@
       max-width: 100%;
       font: inherit;
       font-weight: 600;
-      color: #0F6722;
-      background: #ffffff;
-      border: 1px solid #0F6722;
+      color: var(--color-accent-text);
+      background: var(--color-bg);
+      border: 1px solid var(--color-accent-text);
       border-radius: 6px;
       padding: 11px 14px;
       cursor: pointer;
     }
-    .btn-create:hover { background: #f0f7f1; }
+    .btn-create:hover { background: var(--color-accent-soft-bg); }
 
-    /* Message d'erreur en rouge sous le bouton */
+    /* Message d'erreur sous le bouton */
     .auth-error {
       width: 320px;
       max-width: 100%;
-      color: #c0182b;
+      color: var(--color-error);
       font-size: 0.88rem;
       text-align: center;
     }
@@ -174,7 +177,7 @@
     }
     .forgot-link a {
       font-size: 0.85rem;
-      color: #0F6722;
+      color: var(--color-accent-text);
       text-decoration: none;
     }
     .forgot-link a:hover { text-decoration: underline; }
@@ -183,20 +186,44 @@
   </style>
 </head>
 <body>
+  <script>window.AGENT_STAGE_TITLE_KEY = "login.title_tag";</script>
   <div class="top-frame">
     <div class="brand">
       <img src="logo.png" alt="OCPAgentic" class="brand-logo">
     </div>
+    <div class="top-controls">
+      <select id="lang-select" class="lang-select" aria-label="Langue / Language / اللغة">
+        <option value="fr">FR</option>
+        <option value="en">EN</option>
+        <option value="ar">AR</option>
+      </select>
+      <button id="theme-toggle" type="button" class="theme-toggle" data-i18n-aria="theme.toggle" aria-label="Mode sombre">
+        <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+        <svg class="icon-sun" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/>
+          <line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </svg>
+      </button>
+    </div>
   </div>
   <main class="shell">
-    <div class="frame-title">Connexion</div>
+    <div class="frame-title" data-i18n="login.heading">Connexion</div>
     <form id="auth-frame" class="auth-frame" autocomplete="on">
-      <label for="auth-id">Identifiant</label>
-      <input id="auth-id" type="text" autocomplete="username" placeholder="Saisissez votre identifiant">
-      <label for="auth-pass">Mot de passe</label>
+      <label for="auth-id" data-i18n="login.identifier_label">Identifiant</label>
+      <input id="auth-id" type="text" autocomplete="username" data-i18n-placeholder="login.identifier_placeholder" placeholder="Saisissez votre identifiant">
+      <label for="auth-pass" data-i18n="login.password_label">Mot de passe</label>
       <div class="pass-wrap">
-        <input id="auth-pass" type="password" autocomplete="current-password" placeholder="Saisissez votre mot de passe">
-        <button id="toggle-pass" type="button" class="eye-btn" aria-label="Afficher le mot de passe">
+        <input id="auth-pass" type="password" autocomplete="current-password" data-i18n-placeholder="login.password_placeholder" placeholder="Saisissez votre mot de passe">
+        <button id="toggle-pass" type="button" class="eye-btn" data-i18n-aria="login.show_password" aria-label="Afficher le mot de passe">
           <svg class="eye-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"/>
             <circle cx="12" cy="12" r="3"/>
@@ -210,16 +237,18 @@
       </div>
     </form>
 
-    <button id="btn-login" type="button" class="btn-login">Se connecter</button>
+    <button id="btn-login" type="button" class="btn-login" data-i18n="login.btn_login">Se connecter</button>
 
-    <div class="forgot-link"><a href="forgot-password.html">Mot de passe oublié ?</a></div>
+    <div class="forgot-link"><a href="forgot-password.html" data-i18n="login.forgot_link">Mot de passe oublié ?</a></div>
 
     <hr class="sep">
-    <div class="or">ou</div>
+    <div class="or" data-i18n="login.or">ou</div>
 
-    <button id="btn-create" type="button" class="btn-create">Créer un compte</button>
+    <button id="btn-create" type="button" class="btn-create" data-i18n="login.btn_create">Créer un compte</button>
     <p id="auth-error" class="auth-error hidden"></p>
   </main>
+  <script src="theme.js"></script>
+  <script src="i18n.js"></script>
   <script>
     const idInput = document.getElementById("auth-id");
     const passInput = document.getElementById("auth-pass");
@@ -235,7 +264,7 @@
       togglePass.classList.toggle("showing", estMasque);
       togglePass.setAttribute(
         "aria-label",
-        estMasque ? "Masquer le mot de passe" : "Afficher le mot de passe"
+        AgentStageI18N.t(estMasque ? "login.hide_password" : "login.show_password")
       );
     });
 
@@ -269,7 +298,7 @@
       const password = passInput.value;
 
       if (!identifiant || !password) {
-        showError("Remplis l'identifiant et le mot de passe.");
+        showError(AgentStageI18N.t("login.err_fill"));
         return;
       }
 
@@ -282,13 +311,13 @@
           body: JSON.stringify({ identifier: identifiant, password: password })
         });
       } catch (error) {
-        showError("Impossible de contacter le serveur.");
+        showError(AgentStageI18N.t("login.err_server"));
         return;
       }
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) {
-        showError(data.error || "Connexion impossible.");
+        showError(data.error ? AgentStageI18N.translateServerText(data.error) : AgentStageI18N.t("login.err_login_generic"));
         return;
       }
       window.location.href = "page2.html";
@@ -300,12 +329,12 @@
       const password = passInput.value;
 
       if (!identifiant || !password) {
-        showError("Remplis l'identifiant et le mot de passe.");
+        showError(AgentStageI18N.t("login.err_fill"));
         return;
       }
       // Premiere fois : l'identifiant doit obligatoirement etre un mail
       if (!looksLikeEmail(identifiant)) {
-        showError("Pour créer un compte, l'identifiant doit être une adresse mail.");
+        showError(AgentStageI18N.t("login.err_email_required"));
         return;
       }
 
@@ -322,16 +351,16 @@
           })
         });
       } catch (error) {
-        showError("Impossible de contacter le serveur.");
+        showError(AgentStageI18N.t("login.err_server"));
         return;
       }
 
       const data = await response.json().catch(() => ({}));
       if (!response.ok || !data.ok) {
         if (response.status === 409) {
-          showError("Cet identifiant ou ce mot de passe existe déjà.");
+          showError(AgentStageI18N.t("login.err_exists"));
         } else {
-          showError(data.error || "Création du compte impossible.");
+          showError(data.error ? AgentStageI18N.translateServerText(data.error) : AgentStageI18N.t("login.err_create_generic"));
         }
         return;
       }
