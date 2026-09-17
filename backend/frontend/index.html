@@ -40,11 +40,13 @@
 
   <script src="theme.js"></script>
   <script>
-    // Le GIF lui-meme dure ~2800ms (39 frames, temps morts internes deja
-    // raccourcis - voir historique git) et reste fige sur sa derniere frame
-    // (scene de fin) une fois termine. Cette scene de fin reste affichee
-    // 1s de plus qu'avant (jusqu'a 3800ms) avant que le fondu ne demarre ;
-    // le fondu lui-meme garde sa duree d'origine (350ms), non etiree.
+    // Le GIF lui-meme dure ~2350ms : assemblage du logo puis un seul fondu
+    // continu du logo COMPLET (icone+texte) vers le blanc - l'etape
+    // intermediaire ou le texte se retractait pour ne laisser que l'icone
+    // (avant de la faire disparaitre a son tour) a ete supprimee. Reste
+    // fige sur sa derniere frame (deja invisible) une fois termine. Cette
+    // scene de fin reste affichee jusqu'a 3800ms avant que le fondu CSS ne
+    // demarre ; ce fondu garde sa duree d'origine (350ms), non etiree.
     const ANIMATION_DURATION_MS = 3800;
     const FADE_MS = 350;
 
