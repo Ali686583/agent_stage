@@ -185,6 +185,15 @@ def init_db() -> None:
             );
             """
         )
+        # Migration additive : curseur monotone pour le rattrapage SSE (Phase 3).
+        # created_at seul n'est pas fiable comme curseur (collisions possibles
+        # a la microseconde pres) ; seq l'est toujours, y compris pour les
+        # messages inseres avant cette migration (backfill automatique par
+        # Postgres a la creation de la colonne).
+        conn.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS seq BIGSERIAL;")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages (conversation_id, seq);"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS files (

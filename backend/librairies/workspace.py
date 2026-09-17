@@ -17,11 +17,15 @@ ne fait jamais confiance a une valeur venue du navigateur.
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 from psycopg.types.json import Jsonb
 
+from librairies import realtime
 from librairies.database import _db
+
+_logger = logging.getLogger(__name__)
 
 MAX_TITLE_LENGTH = 80
 MAX_PROJECT_NAME_LENGTH = 120
@@ -93,6 +97,7 @@ def _public_message(row: dict) -> dict:
         "model": row["model"],
         "actionId": row["action_id"],
         "resultId": row["result_id"],
+        "seq": row["seq"],
         "createdAt": row["created_at"].isoformat(),
     }
 
@@ -487,7 +492,15 @@ def add_message(
                 result_id,
             ),
         )
-    return get_message(message_id)
+    created = get_message(message_id)
+    try:
+        realtime.publish_event(conversation_id, "message.created", created)
+    except Exception:
+        # Best-effort : le message est deja persiste en Postgres (source de
+        # verite) ; un Redis indisponible ne doit jamais faire echouer
+        # l'envoi, seul le push temps reel est perdu (rattrapable via seq).
+        _logger.warning("publish_event a echoue pour la conversation %s", conversation_id, exc_info=True)
+    return created
 
 
 _MESSAGE_SELECT = """
@@ -519,6 +532,19 @@ def list_messages(conversation_id: str, limit: int = 50, before: str | None = No
                 (conversation_id, limit),
             ).fetchall()
     rows.reverse()
+    return [_public_message(r) for r in rows]
+
+
+def list_messages_after(conversation_id: str, after_seq: int) -> list[dict]:
+    """Rattrapage SSE : tous les messages strictement posterieurs a
+    after_seq, dans l'ordre. Utilise a la connexion (after_seq = plus grand
+    seq deja recu par le client) et a la reconnexion (after_seq derive du
+    header Last-Event-ID envoye automatiquement par EventSource)."""
+    with _db() as conn:
+        rows = conn.execute(
+            _MESSAGE_SELECT + " WHERE m.conversation_id = %s AND m.seq > %s ORDER BY m.seq ASC",
+            (conversation_id, after_seq),
+        ).fetchall()
     return [_public_message(r) for r in rows]
 
 

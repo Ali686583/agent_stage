@@ -21,15 +21,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import mimetypes
 import os
 import time
 import uuid
 
 import requests
-from flask import Blueprint, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
 
-from librairies import database, workspace
+from librairies import database, realtime, workspace
 from librairies.rate_limit import limiter
 from librairies.security import hash_token
 
@@ -341,6 +342,96 @@ def rename_project_route(project_id):
     except ValueError as exc:
         return _error(400, str(exc))
     return jsonify(ok=True, project=project)
+
+
+# ---------------------------------------------------------------------------
+# Temps reel : SSE (nouveaux messages) + typing (ephemere, jamais persiste)
+# ---------------------------------------------------------------------------
+
+def _sse_frame(event_id, event_type: str, data: dict) -> str:
+    lines = []
+    if event_id is not None:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event_type}")
+    lines.append(f"data: {json.dumps(data)}")
+    return "\n".join(lines) + "\n\n"
+
+
+@workspace_bp.route("/events", methods=["GET"])
+def events_route():
+    user, err = _require_user()
+    if err:
+        return err
+    conversation_id = request.args.get("conversationId", "")
+    if not conversation_id or not workspace.is_participant(conversation_id, user["id"]):
+        return _error(404, "Conversation introuvable.")
+
+    # EventSource renvoie automatiquement Last-Event-Id a la reconnexion ;
+    # ?after=N ne sert qu'au tout premier appel (pas encore de reconnexion).
+    raw_last_id = request.headers.get("Last-Event-ID") or request.args.get("after", "0")
+    try:
+        after_seq = int(raw_last_id)
+    except (TypeError, ValueError):
+        after_seq = 0
+
+    def generate():
+        # S'abonner AVANT de lire le rattrapage Postgres : un message publie
+        # pendant la requete de rattrapage est ainsi mis en tampon par Redis
+        # plutot que perdu (au pire il sera vu deux fois, filtre ci-dessous
+        # via last_seq - jamais perdu).
+        pubsub = realtime.subscribe(conversation_id)
+        last_seq = after_seq
+        try:
+            for message in workspace.list_messages_after(conversation_id, after_seq):
+                last_seq = max(last_seq, message["seq"] or 0)
+                yield _sse_frame(message["seq"], "message.created", message)
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                try:
+                    payload = json.loads(raw["data"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                event_type = payload.get("type", "message")
+                data = payload.get("data", {})
+                if event_type == "message.created":
+                    seq = data.get("seq") or 0
+                    if seq <= last_seq:
+                        continue  # deja envoye pendant le rattrapage
+                    last_seq = seq
+                    yield _sse_frame(seq, event_type, data)
+                else:
+                    # typing et futurs evenements ephemeres : jamais rejoues
+                    # au rattrapage, pas d'id SSE (rien a "reconnecter").
+                    yield _sse_frame(None, event_type, data)
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/conversations/<conversation_id>/typing", methods=["POST"])
+@limiter.limit("60 per minute")
+def typing_route(conversation_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not workspace.is_participant(conversation_id, user["id"]):
+        return _error(404, "Conversation introuvable.")
+    try:
+        realtime.publish_event(
+            conversation_id,
+            "typing",
+            {"userId": user["id"], "displayName": user["displayName"], "avatarUrl": user["avatarUrl"]},
+        )
+    except Exception:
+        pass  # ephemere et best-effort : ne jamais faire echouer cet appel
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------------------

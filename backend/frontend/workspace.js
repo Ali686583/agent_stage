@@ -30,6 +30,12 @@
     discussionsCursor: null,
     sending: false,
     sidebarCollapsed: false,
+    // Temps reel (Phase 3)
+    eventSource: null,
+    seenMessageIds: new Set(),
+    lastSeenSeq: 0,
+    typingUsers: new Map(), // userId -> { displayName, avatarUrl, timeoutId }
+    lastTypingPingAt: 0,
   };
 
   // ---------------------------------------------------------------------
@@ -707,6 +713,7 @@
   // ---------------------------------------------------------------------
 
   function startNewDiscussion() {
+    disconnectRealtime();
     state.conversationId = null;
     state.conversationTitle = "";
     resetComposer();
@@ -721,13 +728,121 @@
     state.conversationTitle = data.conversation.title;
     dom.centralColumn.classList.remove("is-empty");
     dom.conversationArea.innerHTML = "";
-    data.messages.forEach((message) => renderMessage(message));
+    state.seenMessageIds = new Set();
+    state.lastSeenSeq = 0;
+    data.messages.forEach((message) => {
+      state.seenMessageIds.add(message.id);
+      if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
+      renderMessage(message);
+    });
     scrollToBottom();
     document.querySelectorAll(".sidebar-item").forEach((n) => {
       n.classList.toggle("active", n.getAttribute("data-conversation-id") === conversationId);
     });
     dom.sidebarColumn.classList.remove("mobile-open");
     dom.backdrop.classList.remove("visible");
+    connectRealtime(conversationId);
+  }
+
+  // ---------------------------------------------------------------------
+  // Temps reel : SSE (nouveaux messages) + indicateurs "en train d'ecrire"
+  // ---------------------------------------------------------------------
+
+  function disconnectRealtime() {
+    if (state.eventSource) {
+      state.eventSource.close();
+      state.eventSource = null;
+    }
+    state.typingUsers.forEach((entry) => clearTimeout(entry.timeoutId));
+    state.typingUsers.clear();
+    dom.conversationArea.querySelectorAll(".typing-row").forEach((n) => n.remove());
+  }
+
+  function connectRealtime(conversationId) {
+    disconnectRealtime();
+    if (!window.EventSource) return; // navigateur trop ancien : pas de temps reel, le reste marche quand meme
+    const url = `${API}/events?conversationId=${encodeURIComponent(conversationId)}&after=${state.lastSeenSeq}`;
+    const source = new EventSource(url, { withCredentials: true });
+
+    source.addEventListener("message.created", (event) => {
+      let message;
+      try {
+        message = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      if (state.seenMessageIds.has(message.id)) return; // deja rendu localement (propre envoi) ou deja vu
+      state.seenMessageIds.add(message.id);
+      if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
+      // Retire l'indicateur typing de l'auteur (il vient d'envoyer) sans
+      // redessiner tout de suite : renderMessage() doit inserer le message
+      // AVANT les bulles typing restantes, qui doivent toujours rester en
+      // bas de la conversation.
+      if (message.userId) state.typingUsers.delete(message.userId);
+      renderMessage(message);
+      renderTypingRows();
+      scrollToBottom();
+    });
+
+    source.addEventListener("typing", (event) => {
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      if (!data.userId || data.userId === state.user.id) return; // jamais son propre indicateur
+      upsertTypingIndicator(data.userId, data.displayName, data.avatarUrl);
+    });
+
+    state.eventSource = source;
+  }
+
+  function upsertTypingIndicator(userId, displayName, avatarUrl) {
+    let entry = state.typingUsers.get(userId);
+    if (entry) {
+      clearTimeout(entry.timeoutId);
+    } else {
+      entry = { displayName, avatarUrl };
+      state.typingUsers.set(userId, entry);
+    }
+    // Timeout automatique : si aucun nouvel evenement typing n'arrive avant
+    // 4s (l'utilisateur s'est arrete ou a envoye), la bulle disparait.
+    entry.timeoutId = setTimeout(() => removeTypingIndicator(userId), 4000);
+    renderTypingRows();
+  }
+
+  function removeTypingIndicator(userId) {
+    const entry = state.typingUsers.get(userId);
+    if (!entry) return;
+    clearTimeout(entry.timeoutId);
+    state.typingUsers.delete(userId);
+    renderTypingRows();
+  }
+
+  function renderTypingRows() {
+    dom.conversationArea.querySelectorAll(".typing-row").forEach((n) => n.remove());
+    state.typingUsers.forEach((entry) => {
+      const row = el("div", { class: "message-row assistant typing-row" }, [
+        el("div", { class: "message-bubble" }, [
+          el("div", { class: "message-author" }, [
+            avatarNode("message-author-avatar", entry.avatarUrl, entry.displayName),
+            entry.displayName,
+          ]),
+          el("div", { class: "loader-dots" }, [el("span"), el("span"), el("span")]),
+        ]),
+      ]);
+      dom.conversationArea.appendChild(row);
+    });
+    scrollToBottom();
+  }
+
+  function pingTyping() {
+    if (!state.conversationId) return; // pas encore de conversation : rien a signaler
+    const now = Date.now();
+    if (now - state.lastTypingPingAt < 2500) return; // throttle cote client
+    state.lastTypingPingAt = now;
+    api(`/conversations/${state.conversationId}/typing`, { method: "POST" });
   }
 
   function renderInitialQuestion() {
@@ -1241,6 +1356,18 @@
     if (data.isNewConversation) {
       state.conversationId = data.conversationId;
       state.conversationTitle = data.conversationTitle;
+      connectRealtime(state.conversationId); // pas encore connecte : cette conversation vient de naitre
+    }
+    // Ces deux messages ont deja ete rendus localement (l'un ci-dessus de
+    // maniere optimiste, l'autre juste en-dessous) : les marquer vus evite
+    // de les re-afficher en double quand leur propre publication SSE revient.
+    if (data.userMessage) {
+      state.seenMessageIds.add(data.userMessage.id);
+      if (data.userMessage.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, data.userMessage.seq);
+    }
+    if (data.assistantMessage) {
+      state.seenMessageIds.add(data.assistantMessage.id);
+      if (data.assistantMessage.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, data.assistantMessage.seq);
     }
     loadDiscussions(true);
 
@@ -1259,6 +1386,7 @@
 
   function wireComposer() {
     dom.composerTextarea.addEventListener("input", autoResize);
+    dom.composerTextarea.addEventListener("input", pingTyping);
     dom.composerTextarea.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
