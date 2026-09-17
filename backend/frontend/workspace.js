@@ -283,8 +283,10 @@
     });
     dom.nicknameCancel.addEventListener("click", () => dom.nicknameForm.classList.add("hidden"));
     dom.nicknameSave.addEventListener("click", async () => {
+      // Un champ laisse vide (ou uniquement des espaces) est envoye tel
+      // quel : le backend le traite comme une reinitialisation du
+      // pseudonyme (retour a l'email), ce n'est pas ignore ici.
       const value = dom.nicknameInput.value.trim();
-      if (!value) return;
       const { ok, data } = await authApi("/display-name", {
         method: "POST",
         body: JSON.stringify({ displayName: value }),

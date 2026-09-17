@@ -35,17 +35,39 @@
 </head>
 <body>
   <div id="stage">
-    <img src="animation.gif" alt="animation">
+    <img src="animation.gif" alt="animation" id="intro-logo">
   </div>
 
   <script src="theme.js"></script>
   <script>
-    // Durée du GIF (41 frames, ~6000ms), configuré pour ne jouer qu'une fois.
-    const ANIMATION_DURATION_MS = 6000;
+    // Duree reelle du GIF apres reduction des pauses statiques internes
+    // (39 frames, ~2800ms ; le dessin/mouvement n'a pas ete touche, seuls
+    // deux temps morts ont ete raccourcis - voir l'historique git).
+    const ANIMATION_DURATION_MS = 2800;
+    // Fondu CSS supplementaire en toute fin, superpose a la propre fin en
+    // fondu du GIF : garantit une disparition progressive nette quel que
+    // soit le rendu exact des dernieres frames.
+    const FADE_MS = 350;
 
-    setTimeout(() => {
-      window.location.href = "login.html";
-    }, ANIMATION_DURATION_MS);
+    const img = document.getElementById("intro-logo");
+    const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (reduced) {
+      // Pas de lecture d'animation : le logo statique s'affiche brievement,
+      // sans mouvement, puis redirection quasi immediate - l'acces a
+      // l'application n'est jamais ralenti pour finir un effet decoratif.
+      img.src = "logo.png";
+      setTimeout(() => { window.location.href = "login.html"; }, 400);
+    } else {
+      setTimeout(() => {
+        img.style.transition = `opacity ${FADE_MS}ms ease`;
+        img.style.opacity = "0";
+      }, ANIMATION_DURATION_MS - FADE_MS);
+
+      setTimeout(() => {
+        window.location.href = "login.html";
+      }, ANIMATION_DURATION_MS);
+    }
   </script>
 </body>
 </html>

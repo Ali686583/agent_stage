@@ -165,7 +165,7 @@ html, body {
 .project-create-actions .primary {
   background: var(--color-accent);
   border-color: var(--color-accent);
-  color: #fff;
+  color: var(--text-on-brand-green);
 }
 
 .sidebar-list { display: flex; flex-direction: column; gap: 2px; padding-inline-start: 8px; }
@@ -198,7 +198,7 @@ html, body {
   width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
   object-fit: cover;
   background: var(--color-accent);
-  color: #fff;
+  color: var(--text-on-brand-green);
   display: flex; align-items: center; justify-content: center;
   font-size: 0.68rem; font-weight: 700;
 }
@@ -352,7 +352,10 @@ html, body {
   font-size: 0.92rem;
   line-height: 1.55;
 }
-.message-row.user .message-bubble { background: var(--color-accent); color: #ffffff; }
+/* Texte fonce sur le fond vert de marque : du blanc/gris clair y est
+   illisible (contraste ~2.5:1, sous le seuil AA) - voir le token
+   --text-on-brand-green dans theme.css (contraste verifie 7.1:1). */
+.message-row.user .message-bubble { background: var(--color-accent); color: var(--text-on-brand-green); }
 .message-row.assistant .message-bubble {
   background: var(--color-topbar-bg);
   color: var(--color-text);
@@ -366,6 +369,7 @@ html, body {
   color: var(--color-muted);
   margin-bottom: 4px;
 }
+.message-row.user .message-author { color: var(--text-on-brand-green); opacity: 0.75; }
 .message-author-avatar {
   width: 18px; height: 18px; border-radius: 50%; object-fit: cover;
 }
@@ -657,7 +661,7 @@ html, body {
   height: 32px;
   border-radius: 50%;
   background: var(--color-accent);
-  color: #fff;
+  color: var(--text-on-brand-green);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -778,7 +782,13 @@ html, body {
   cursor: pointer;
   padding: 4px;
   text-align: start;
+  border-radius: var(--radius-small);
 }
+/* Regle generique (les deux autres .danger-text sont scopees a leur propre
+   menu) : "Supprimer le pseudonyme" doit rester rouge dans les deux themes,
+   jamais le vert de marque, avec un hover coherent et accessible. */
+.danger-text { color: var(--color-error); }
+.link-btn.danger-text:hover { background: var(--color-error); color: #fff; }
 
 /* ---------------------------------------------------------------------
    Modale de confirmation (suppression conversation / projet / compte)

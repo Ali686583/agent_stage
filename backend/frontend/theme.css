@@ -1,6 +1,21 @@
 /* ===== Variables de couleur partagees (clair / sombre) ===== */
 
 :root {
+  /* ===== Vert de marque : source de verite unique =====
+     --brand-green est la couleur EXACTE extraite du logo OCPAgentic
+     (median des pixels verts de animation.gif/logo.png). Toute variante
+     (hover, texte, fond doux) est DERIVEE de cette meme teinte/saturation
+     (seule la luminosite change), jamais une nuance de vert choisie a part -
+     voir le calcul de contraste documente au moment de leur ajout.
+     Les anciens noms --color-accent* restent en place (utilises dans tout
+     le CSS existant) mais pointent maintenant vers ces tokens de marque :
+     un seul systeme, pas de variante parallele. */
+  --brand-green: #6DB831;
+  --brand-green-hover: #5FA12B;
+  --brand-green-text: #487920;       /* contraste 5.2:1 sur fond blanc (AA) */
+  --brand-green-soft-bg: #f0f7f1;
+  --text-on-brand-green: #1a1a1a;    /* contraste 7.1:1 sur --brand-green */
+
   --color-bg: #ffffff;
   --color-text: #1a1a1a;
   --color-topbar-bg: #eaeaea;
@@ -11,10 +26,10 @@
   --color-placeholder: #9aa0a6;
   --color-label: #333333;
   --color-error: #c0182b;
-  --color-accent: #6DB831;
-  --color-accent-hover: #5CA028;
-  --color-accent-text: #0F6722;
-  --color-accent-soft-bg: #f0f7f1;
+  --color-accent: var(--brand-green);
+  --color-accent-hover: var(--brand-green-hover);
+  --color-accent-text: var(--brand-green-text);
+  --color-accent-soft-bg: var(--brand-green-soft-bg);
   --color-disabled: #9fbfa8;
   --color-icon: #777777;
   --color-icon-hover: #1a1a1a;
@@ -30,6 +45,12 @@
 }
 
 :root[data-theme="dark"] {
+  /* Meme teinte de marque, luminosite adaptee pour un contraste correct
+     sur fond sombre (vert plus clair pour le texte, cf. commentaire ci-dessus). */
+  --brand-green-hover: #7fcf3f;
+  --brand-green-text: #85CF4A;       /* contraste 9.8:1 sur --color-bg sombre */
+  --brand-green-soft-bg: #1c2b17;
+
   --color-bg: #121212;
   --color-text: #f2f2f2;
   --color-topbar-bg: #1e1e1e;
@@ -40,10 +61,10 @@
   --color-placeholder: #7a7a7a;
   --color-label: #cccccc;
   --color-error: #ff6b6b;
-  --color-accent: #6DB831;
-  --color-accent-hover: #7fcf3f;
-  --color-accent-text: #8fd65a;
-  --color-accent-soft-bg: #1c2b17;
+  --color-accent: var(--brand-green);
+  --color-accent-hover: var(--brand-green-hover);
+  --color-accent-text: var(--brand-green-text);
+  --color-accent-soft-bg: var(--brand-green-soft-bg);
   --color-disabled: #3d4d38;
   --color-icon: #aaaaaa;
   --color-icon-hover: #ffffff;

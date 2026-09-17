@@ -136,7 +136,9 @@
       max-width: 100%;
       font: inherit;
       font-weight: 600;
-      color: #ffffff;
+      /* Texte fonce (pas blanc) : contraste insuffisant sur ce vert, voir
+         --text-on-brand-green dans theme.css. */
+      color: var(--text-on-brand-green);
       background: var(--color-accent);
       border: 0;
       border-radius: 6px;

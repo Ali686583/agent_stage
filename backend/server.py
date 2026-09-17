@@ -182,6 +182,13 @@ def set_display_name():
         return _error(401, "Non authentifie.")
     data = request.get_json(silent=True) or {}
     display_name = str(data.get("displayName", ""))[:200]
+
+    # Champ vide (ou uniquement des espaces) + Enregistrer == suppression du
+    # pseudonyme : l'email redevient l'identite affichee. Ce n'est pas une
+    # erreur de validation, c'est le comportement explicitement demande.
+    if not display_name.strip():
+        return jsonify(ok=True, user=database.clear_display_name(user["id"]))
+
     try:
         updated_user = database.set_display_name(user["id"], display_name)
     except ValueError as exc:
