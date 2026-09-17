@@ -28,6 +28,11 @@
     if (btn) {
       btn.setAttribute("aria-pressed", theme === "dark" ? "true" : "false");
     }
+    // Le mot "Agentic" est en noir dans le logo : une variante avec ce mot
+    // en blanc (logo-dark.png) est utilisee en mode sombre pour rester lisible.
+    document.querySelectorAll(".brand-logo").forEach((img) => {
+      img.src = theme === "dark" ? "logo-dark.png" : "logo.png";
+    });
   }
 
   function toggleTheme() {
