@@ -1253,7 +1253,7 @@
 
   function openActionWidgetMenu(entryAction, anchorBtn) {
     closeContextMenu();
-    const menu = el("div", { class: "item-context-menu open" });
+    const menu = el("div", { class: "item-context-menu open align-start" });
     menu.appendChild(
       el("button", {
         type: "button",
@@ -1320,7 +1320,7 @@
 
   function openAddActionMenu() {
     closeContextMenu();
-    const menu = el("div", { class: "item-context-menu open" });
+    const menu = el("div", { class: "item-context-menu open align-start" });
     menu.appendChild(
       el("button", {
         type: "button",

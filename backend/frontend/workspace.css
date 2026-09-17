@@ -260,6 +260,12 @@ html, body {
   display: none;
 }
 .item-context-menu.open { display: block; }
+/* Variante ancree a gauche : necessaire pour les menus dont le bouton
+   declencheur est pres du bord gauche (bouton "+" et "..." des boutons
+   d'action) - sinon le menu (ancre par defaut sur son bord droit) deborde
+   hors de l'ecran, meme probleme que le bug de menu de renommage deja
+   corrige (position: relative manquante), mais cote alignement ici. */
+.item-context-menu.align-start { inset-inline-start: 4px; inset-inline-end: auto; }
 .item-context-menu button {
   display: block;
   width: 100%;
