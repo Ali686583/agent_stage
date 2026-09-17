@@ -19,9 +19,19 @@
   --color-icon: #777777;
   --color-icon-hover: #1a1a1a;
   --color-input-bg: #ffffff;
+
+  /* Systeme d'arrondis coherent : utilise partout (entry, boutons,
+     selecteur, chips, bulles...) plutot que des rayons arbitraires. */
+  --radius-small: 6px;
+  --radius-medium: 10px;
+  --radius-large: 16px;
+
+  --model-chatgpt-color: #1a1a1a;
+  --model-claude-color: #d97706;
 }
 
 :root[data-theme="dark"] {
+  --model-chatgpt-color: #ffffff;
   --color-bg: #121212;
   --color-text: #f2f2f2;
   --color-topbar-bg: #1e1e1e;

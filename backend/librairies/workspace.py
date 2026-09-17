@@ -1,0 +1,487 @@
+"""
+librairies/workspace.py
+========================
+
+Couche de persistance de l'espace collaboratif IA (page affichee juste
+apres connexion) : projets, conversations, messages, fichiers, resultats
+reutilisables et executions de workflow n8n.
+
+Meme principe que database.py : toute requete SQL vit ici, jamais dans les
+routes (backend/workspace_routes.py). Reutilise la meme connexion Postgres
+que le reste de l'application.
+
+L'identite (user_id, author_name) est toujours fournie par l'appelant a
+partir de la session authentifiee (backend/workspace_routes.py) : ce module
+ne fait jamais confiance a une valeur venue du navigateur.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+from psycopg.types.json import Jsonb
+
+from librairies.database import _db
+
+MAX_TITLE_LENGTH = 80
+MAX_PROJECT_NAME_LENGTH = 120
+
+
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:20]}"
+
+
+def derive_title(message: str) -> str:
+    cleaned = " ".join((message or "").split())
+    if not cleaned:
+        return "Nouvelle discussion"
+    if len(cleaned) <= MAX_TITLE_LENGTH:
+        return cleaned
+    truncated = cleaned[:MAX_TITLE_LENGTH].rsplit(" ", 1)[0]
+    return (truncated or cleaned[:MAX_TITLE_LENGTH]) + "…"
+
+
+# ---------------------------------------------------------------------------
+# Serialisation
+# ---------------------------------------------------------------------------
+
+def _public_project(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "createdByUserId": row["created_by_user_id"],
+        "createdByName": row["created_by_name"],
+        "createdAt": row["created_at"].isoformat(),
+        "updatedAt": row["updated_at"].isoformat(),
+        "conversationCount": row.get("conversation_count", 0),
+    }
+
+
+def _public_conversation(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "createdByUserId": row["created_by_user_id"],
+        "createdByName": row["created_by_name"],
+        "createdAt": row["created_at"].isoformat(),
+        "updatedAt": row["updated_at"].isoformat(),
+    }
+
+
+def _public_message(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "conversationId": row["conversation_id"],
+        "userId": row["user_id"],
+        "authorName": row["author_name"],
+        "role": row["role"],
+        "content": row["content"],
+        "blocks": row["blocks"],
+        "model": row["model"],
+        "actionId": row["action_id"],
+        "resultId": row["result_id"],
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+def _public_file(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "name": row["original_name"],
+        "mimeType": row["mime_type"],
+        "size": row["size_bytes"],
+        "uploadedByUserId": row["uploaded_by_user_id"],
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+def _public_result(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "conversationId": row["conversation_id"],
+        "messageId": row["message_id"],
+        "userId": row["user_id"],
+        "model": row["model"],
+        "workflowType": row["workflow_type"],
+        "request": row["request"],
+        "response": row["response"],
+        "status": row["status"],
+        "syncStatus": row["sync_status"],
+        "sourceResultIds": row["source_result_ids"],
+        "metadata": row["metadata"],
+        "createdAt": row["created_at"].isoformat(),
+    }
+
+
+def _public_workflow_run(row: dict) -> dict:
+    return {
+        "id": row["id"],
+        "conversationId": row["conversation_id"],
+        "messageId": row["message_id"],
+        "userId": row["user_id"],
+        "resultId": row["result_id"],
+        "workflowType": row["workflow_type"],
+        "requestId": row["request_id"],
+        "n8nExecutionId": row["n8n_execution_id"],
+        "status": row["status"],
+        "startedAt": row["started_at"].isoformat(),
+        "completedAt": row["completed_at"].isoformat() if row["completed_at"] else None,
+        "error": row["error"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Projets
+# ---------------------------------------------------------------------------
+
+def list_projects() -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.*, count(pc.conversation_id) AS conversation_count
+            FROM projects p
+            LEFT JOIN project_conversations pc ON pc.project_id = p.id
+            GROUP BY p.id
+            ORDER BY p.updated_at DESC
+            """
+        ).fetchall()
+    return [_public_project(r) for r in rows]
+
+
+def create_project(user_id: str, user_name: str, name: str) -> dict:
+    cleaned = (name or "").strip()
+    if not cleaned:
+        raise ValueError("Le nom du projet ne peut pas etre vide.")
+    if len(cleaned) > MAX_PROJECT_NAME_LENGTH:
+        raise ValueError(f"Le nom du projet doit faire moins de {MAX_PROJECT_NAME_LENGTH} caracteres.")
+    project_id = new_id("proj")
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO projects (id, name, created_by_user_id, created_by_name)
+               VALUES (%s, %s, %s, %s)""",
+            (project_id, cleaned, user_id, user_name),
+        )
+    return {
+        "id": project_id,
+        "name": cleaned,
+        "createdByUserId": user_id,
+        "createdByName": user_name,
+        "conversationCount": 0,
+    }
+
+
+def project_exists(project_id: str) -> bool:
+    with _db() as conn:
+        row = conn.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,)).fetchone()
+    return row is not None
+
+
+def list_project_conversations(project_id: str, limit: int = 30, before: str | None = None) -> list[dict]:
+    limit = max(1, min(limit, 100))
+    with _db() as conn:
+        if before:
+            rows = conn.execute(
+                """SELECT c.* FROM conversations c
+                   JOIN project_conversations pc ON pc.conversation_id = c.id
+                   WHERE pc.project_id = %s AND c.updated_at < %s
+                   ORDER BY c.updated_at DESC LIMIT %s""",
+                (project_id, before, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT c.* FROM conversations c
+                   JOIN project_conversations pc ON pc.conversation_id = c.id
+                   WHERE pc.project_id = %s
+                   ORDER BY c.updated_at DESC LIMIT %s""",
+                (project_id, limit),
+            ).fetchall()
+    return [_public_conversation(r) for r in rows]
+
+
+def add_conversation_to_project(project_id: str, conversation_id: str, user_id: str) -> None:
+    with _db() as conn:
+        if not conn.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,)).fetchone():
+            raise ValueError("Projet introuvable.")
+        if not conn.execute("SELECT 1 FROM conversations WHERE id = %s", (conversation_id,)).fetchone():
+            raise ValueError("Conversation introuvable.")
+        conn.execute(
+            """INSERT INTO project_conversations (project_id, conversation_id, added_by_user_id)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (project_id, conversation_id, user_id),
+        )
+        conn.execute("UPDATE projects SET updated_at = now() WHERE id = %s", (project_id,))
+
+
+# ---------------------------------------------------------------------------
+# Conversations
+# ---------------------------------------------------------------------------
+
+def list_conversations(limit: int = 30, before: str | None = None) -> list[dict]:
+    limit = max(1, min(limit, 100))
+    with _db() as conn:
+        if before:
+            rows = conn.execute(
+                """SELECT * FROM conversations WHERE updated_at < %s
+                   ORDER BY updated_at DESC LIMIT %s""",
+                (before, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM conversations ORDER BY updated_at DESC LIMIT %s",
+                (limit,),
+            ).fetchall()
+    return [_public_conversation(r) for r in rows]
+
+
+def get_conversation(conversation_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM conversations WHERE id = %s", (conversation_id,)).fetchone()
+    return _public_conversation(row) if row else None
+
+
+def create_conversation(user_id: str, user_name: str, title: str, project_id: str | None = None) -> dict:
+    conversation_id = new_id("conv")
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO conversations (id, title, created_by_user_id, created_by_name)
+               VALUES (%s, %s, %s, %s)""",
+            (conversation_id, title[:MAX_TITLE_LENGTH], user_id, user_name),
+        )
+        if project_id:
+            if not conn.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,)).fetchone():
+                raise ValueError("Projet introuvable.")
+            conn.execute(
+                """INSERT INTO project_conversations (project_id, conversation_id, added_by_user_id)
+                   VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+                (project_id, conversation_id, user_id),
+            )
+    return get_conversation(conversation_id)
+
+
+def touch_conversation(conversation_id: str) -> None:
+    with _db() as conn:
+        conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
+
+
+# ---------------------------------------------------------------------------
+# Messages
+# ---------------------------------------------------------------------------
+
+def add_message(
+    conversation_id: str,
+    user_id: str | None,
+    author_name: str,
+    role: str,
+    content: str,
+    blocks: list | None = None,
+    model: str | None = None,
+    action_id: str | None = None,
+    result_id: str | None = None,
+) -> dict:
+    message_id = new_id("msg")
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO messages
+               (id, conversation_id, user_id, author_name, role, content, blocks, model, action_id, result_id)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                message_id,
+                conversation_id,
+                user_id,
+                author_name,
+                role,
+                content,
+                Jsonb(blocks) if blocks is not None else None,
+                model,
+                action_id,
+                result_id,
+            ),
+        )
+    return get_message(message_id)
+
+
+def get_message(message_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM messages WHERE id = %s", (message_id,)).fetchone()
+    return _public_message(row) if row else None
+
+
+def list_messages(conversation_id: str, limit: int = 50, before: str | None = None) -> list[dict]:
+    limit = max(1, min(limit, 200))
+    with _db() as conn:
+        if before:
+            rows = conn.execute(
+                """SELECT * FROM messages WHERE conversation_id = %s AND created_at < %s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (conversation_id, before, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """SELECT * FROM messages WHERE conversation_id = %s
+                   ORDER BY created_at DESC LIMIT %s""",
+                (conversation_id, limit),
+            ).fetchall()
+    rows.reverse()
+    return [_public_message(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Fichiers
+# ---------------------------------------------------------------------------
+
+def create_file_record(
+    file_id: str, user_id: str, original_name: str, mime_type: str, size_bytes: int, storage_reference: str
+) -> dict:
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO files (id, original_name, mime_type, size_bytes, storage_reference, uploaded_by_user_id)
+               VALUES (%s,%s,%s,%s,%s,%s)""",
+            (file_id, original_name, mime_type, size_bytes, storage_reference, user_id),
+        )
+    return get_file(file_id)
+
+
+def get_file(file_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM files WHERE id = %s", (file_id,)).fetchone()
+    return _public_file(row) if row else None
+
+
+def get_file_storage_reference(file_id: str) -> str | None:
+    with _db() as conn:
+        row = conn.execute("SELECT storage_reference FROM files WHERE id = %s", (file_id,)).fetchone()
+    return row["storage_reference"] if row else None
+
+
+def user_can_access_file(file_id: str, user_id: str) -> bool:
+    """Le proprietaire y a toujours accès ; une fois le fichier attache a un
+    message (donc partage dans une conversation), tout utilisateur
+    authentifie de cet espace collaboratif peut y accéder aussi."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT uploaded_by_user_id FROM files WHERE id = %s", (file_id,)
+        ).fetchone()
+        if not row:
+            return False
+        if row["uploaded_by_user_id"] == user_id:
+            return True
+        attached = conn.execute(
+            "SELECT 1 FROM message_attachments WHERE file_id = %s LIMIT 1", (file_id,)
+        ).fetchone()
+        return attached is not None
+
+
+def link_files_to_message(message_id: str, file_ids: list[str]) -> None:
+    with _db() as conn:
+        for file_id in file_ids:
+            conn.execute(
+                """INSERT INTO message_attachments (id, message_id, file_id)
+                   VALUES (%s, %s, %s)""",
+                (new_id("att"), message_id, file_id),
+            )
+
+
+def list_message_attachments(message_id: str) -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT f.* FROM message_attachments ma
+               JOIN files f ON f.id = ma.file_id
+               WHERE ma.message_id = %s""",
+            (message_id,),
+        ).fetchall()
+    return [_public_file(r) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Resultats reutilisables
+# ---------------------------------------------------------------------------
+
+def create_result(
+    conversation_id: str,
+    message_id: str,
+    user_id: str,
+    model: str,
+    workflow_type: str,
+    request: dict,
+    response: dict,
+    source_result_ids: list[str] | None = None,
+    metadata: dict | None = None,
+    sync_status: str = "synced",
+) -> dict:
+    result_id = new_id("res")
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO results
+               (id, conversation_id, message_id, user_id, model, workflow_type,
+                request, response, source_result_ids, metadata, sync_status)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (
+                result_id,
+                conversation_id,
+                message_id,
+                user_id,
+                model,
+                workflow_type,
+                Jsonb(request),
+                Jsonb(response),
+                source_result_ids or [],
+                Jsonb(metadata) if metadata is not None else None,
+                sync_status,
+            ),
+        )
+    return get_result(result_id)
+
+
+def get_result(result_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute("SELECT * FROM results WHERE id = %s", (result_id,)).fetchone()
+    return _public_result(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Executions de workflow (idempotence + tracabilite)
+# ---------------------------------------------------------------------------
+
+def start_workflow_run(
+    conversation_id: str, message_id: str | None, user_id: str, workflow_type: str, request_id: str
+) -> dict | None:
+    """Cree un run en 'running'. Renvoie None si ce request_id a deja ete vu
+    (rejoue reseau, double-clic) : l'appelant doit alors relire le run
+    existant via get_workflow_run_by_request_id plutot que rappeler n8n."""
+    run_id = new_id("run")
+    with _db() as conn:
+        if conn.execute(
+            "SELECT 1 FROM workflow_runs WHERE request_id = %s", (request_id,)
+        ).fetchone():
+            return None
+        conn.execute(
+            """INSERT INTO workflow_runs
+               (id, conversation_id, message_id, user_id, workflow_type, request_id, status)
+               VALUES (%s,%s,%s,%s,%s,%s,'running')""",
+            (run_id, conversation_id, message_id, user_id, workflow_type, request_id),
+        )
+    return {"id": run_id}
+
+
+def complete_workflow_run(
+    run_id: str,
+    status: str,
+    result_id: str | None = None,
+    error: str | None = None,
+    n8n_execution_id: str | None = None,
+) -> None:
+    with _db() as conn:
+        conn.execute(
+            """UPDATE workflow_runs
+               SET status = %s, result_id = %s, error = %s, n8n_execution_id = %s, completed_at = now()
+               WHERE id = %s""",
+            (status, result_id, error, n8n_execution_id, run_id),
+        )
+
+
+def get_workflow_run_by_request_id(request_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM workflow_runs WHERE request_id = %s", (request_id,)
+        ).fetchone()
+    return _public_workflow_run(row) if row else None

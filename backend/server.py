@@ -26,22 +26,24 @@ from __future__ import annotations
 import os
 
 from flask import Flask, jsonify, request, send_from_directory
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from librairies import database
 from librairies.email_service import send_password_reset_email
+from librairies.rate_limit import limiter
 from librairies.security import generate_token, hash_token
+from workspace_routes import workspace_bp
 
 PORT = int(os.environ.get("PORT", "8080"))
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "").rstrip("/")
 SESSION_COOKIE_NAME = "agent_stage_session"
 SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "7"))
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() != "false"
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 app = Flask(__name__, static_folder="frontend", static_url_path="")
-app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 Mo, largement suffisant pour ces routes
+# Doit couvrir le plus gros upload de document autorise (voir workspace_routes.py).
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_BYTES + 1_000_000
 
 # Railway termine les connexions via son propre edge, avec un pool d'IP
 # internes rotatives comme dernier maillon de X-Forwarded-For : ProxyFix
@@ -49,12 +51,8 @@ app.config["MAX_CONTENT_LENGTH"] = 1_000_000  # 1 Mo, largement suffisant pour c
 # revanche cette IP directement dans X-Real-Ip, verifie via /debug/ip.
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
-
-def _client_ip() -> str:
-    return request.headers.get("X-Real-Ip") or get_remote_address()
-
-
-limiter = Limiter(_client_ip, app=app, default_limits=[], storage_uri="memory://")
+limiter.init_app(app)
+app.register_blueprint(workspace_bp)
 
 database.init_db()
 

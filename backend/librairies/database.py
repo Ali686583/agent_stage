@@ -98,6 +98,140 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_reset_tokens_user ON password_reset_tokens (user_id);"
         )
 
+        # -- Espace collaboratif IA (page apres connexion) -------------------
+        # Tables additives uniquement : aucune des tables ci-dessus n'est
+        # modifiee ni supprimee. Voir librairies/workspace.py pour l'usage.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS projects (
+                id                 TEXT PRIMARY KEY,
+                name               TEXT NOT NULL,
+                created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_by_name    TEXT NOT NULL,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversations (
+                id                 TEXT PRIMARY KEY,
+                title              TEXT NOT NULL DEFAULT '',
+                created_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_by_name    TEXT NOT NULL,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS project_conversations (
+                project_id       TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                added_by_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (project_id, conversation_id)
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                id              TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                user_id         TEXT REFERENCES users(id) ON DELETE SET NULL,
+                author_name     TEXT NOT NULL,
+                role            TEXT NOT NULL,
+                content         TEXT NOT NULL DEFAULT '',
+                blocks          JSONB,
+                model           TEXT,
+                action_id       TEXT,
+                result_id       TEXT,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS files (
+                id                   TEXT PRIMARY KEY,
+                original_name        TEXT NOT NULL,
+                mime_type            TEXT NOT NULL,
+                size_bytes           BIGINT NOT NULL,
+                storage_reference    TEXT NOT NULL,
+                uploaded_by_user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_attachments (
+                id          TEXT PRIMARY KEY,
+                message_id  TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                file_id     TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS results (
+                id                 TEXT PRIMARY KEY,
+                conversation_id    TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                message_id         TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                user_id            TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                model              TEXT NOT NULL,
+                workflow_type      TEXT NOT NULL,
+                request            JSONB NOT NULL,
+                response           JSONB NOT NULL,
+                status             TEXT NOT NULL DEFAULT 'completed',
+                sync_status        TEXT NOT NULL DEFAULT 'synced',
+                source_result_ids  TEXT[] NOT NULL DEFAULT '{}',
+                metadata           JSONB,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS workflow_runs (
+                id               TEXT PRIMARY KEY,
+                conversation_id  TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                message_id       TEXT REFERENCES messages(id) ON DELETE SET NULL,
+                user_id          TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                result_id        TEXT REFERENCES results(id) ON DELETE SET NULL,
+                workflow_type    TEXT NOT NULL,
+                request_id       TEXT NOT NULL UNIQUE,
+                n8n_execution_id TEXT,
+                status           TEXT NOT NULL DEFAULT 'queued',
+                started_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                completed_at     TIMESTAMPTZ,
+                error            TEXT
+            );
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations (updated_at DESC);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages (conversation_id, created_at);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_project_conversations_conv ON project_conversations (conversation_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments (message_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_conversation ON results (conversation_id);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_files_uploader ON files (uploaded_by_user_id);"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Validation / normalisation
