@@ -158,6 +158,7 @@
     dom.logoutBtn = document.getElementById("ws-logout-btn");
     dom.moreOptionsBtn = document.getElementById("ws-more-options-btn");
     dom.moreOptionsPanel = document.getElementById("ws-more-options-panel");
+    dom.deleteAccountPanel = document.getElementById("ws-delete-account-panel");
     dom.optAvatar = document.getElementById("ws-opt-avatar");
     dom.optNickname = document.getElementById("ws-opt-nickname");
     dom.optDeleteAccount = document.getElementById("ws-opt-delete-account");
@@ -249,6 +250,7 @@
     document.addEventListener("click", () => {
       dom.profileMenu.classList.remove("open");
       dom.moreOptionsPanel.classList.add("hidden");
+      dom.deleteAccountPanel.classList.add("hidden");
       dom.nicknameForm.classList.add("hidden");
     });
     dom.profileMenu.addEventListener("click", (event) => event.stopPropagation());
@@ -259,7 +261,13 @@
     });
 
     dom.moreOptionsBtn.addEventListener("click", () => {
-      dom.moreOptionsPanel.classList.toggle("hidden");
+      // "Plus d'options" affiche/masque tout le groupe d'un coup : la
+      // section avatar/pseudonyme ET "Supprimer le compte" tout en bas,
+      // separes uniquement pour eviter un conflit CSS entre eux (voir
+      // commentaire dans workspace.css).
+      const willOpen = dom.moreOptionsPanel.classList.contains("hidden");
+      dom.moreOptionsPanel.classList.toggle("hidden", !willOpen);
+      dom.deleteAccountPanel.classList.toggle("hidden", !willOpen);
       dom.nicknameForm.classList.add("hidden");
     });
 
