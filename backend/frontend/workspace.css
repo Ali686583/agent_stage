@@ -572,7 +572,8 @@ html, body {
 }
 .composer textarea::placeholder { color: var(--color-placeholder); }
 
-.composer-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.composer-actions-left { position: relative; display: flex; align-items: center; }
 .composer-actions-right { display: flex; gap: 8px; align-items: center; }
 .icon-btn {
   display: flex;
@@ -645,6 +646,24 @@ html, body {
   border-color: var(--color-accent);
   color: var(--color-accent-text);
 }
+
+/* Bouton de la banque (Phase 5) : le "..." reutilise item-context-menu,
+   qui a besoin d'un ancetre "position: relative" pour s'ancrer (meme regle
+   que .sidebar-project-name, voir le correctif du menu de renommage). */
+.action-widget-wrap { position: relative; display: inline-flex; align-items: center; }
+.action-widget-menu-btn {
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 2px 5px;
+  margin-inline-start: 2px;
+  border-radius: var(--radius-small);
+  font-size: 0.8rem;
+  line-height: 1;
+}
+.action-widget-menu-btn:hover { background: var(--color-border); }
+.action-bank-results { max-height: 220px; overflow-y: auto; }
 
 /* ---------------------------------------------------------------------
    Profil (avatar + dropdown, pattern MyBusiness) + "Plus d'options"

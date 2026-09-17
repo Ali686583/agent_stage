@@ -13,17 +13,6 @@
   // legitime mais lente.
   const PENDING_REQUEST_TIMEOUT_MS = 130000;
 
-  // Widgets d'actions : de vrais boutons, jamais un menu deroulant.
-  // Structure prete pour brancher une vraie action n8n plus tard (action.id
-  // doit alors correspondre a l'allowlist du backend, cf. workspace_routes.py).
-  const ACTION_WIDGETS = [
-    { label: "Label 1", icon: null, action: { id: null, type: null, parameters: {} } },
-    { label: "Label 2", icon: null, action: { id: null, type: null, parameters: {} } },
-    { label: "Label 3", icon: null, action: { id: null, type: null, parameters: {} } },
-    { label: "Label 4", icon: null, action: { id: null, type: null, parameters: {} } },
-    { label: "Label 5", icon: null, action: { id: null, type: null, parameters: {} } },
-  ];
-
   const state = {
     user: null,
     conversationId: null,
@@ -32,6 +21,9 @@
     attachments: [], // {fileId, name, status: 'uploading'|'uploaded'|'failed'}
     sourceResultIds: [],
     selectedWidgetIndex: null,
+    // Banque de boutons/actions (Phase 5) : chargee depuis le backend
+    // (Postgres-jg_R via /api/workspace/entry-actions), jamais codee en dur.
+    entryActions: [],
     projects: [],
     discussionsCursor: null,
     sending: false,
@@ -161,6 +153,7 @@
     dom.sendBtn = document.getElementById("ws-send-btn");
     dom.modelButtons = Array.from(document.querySelectorAll(".model-selector button"));
     dom.actionWidgets = document.getElementById("ws-action-widgets");
+    dom.addActionBtn = document.getElementById("ws-add-action-btn");
     dom.profileTrigger = document.getElementById("ws-profile-trigger");
     dom.profileMenu = document.getElementById("ws-profile-menu");
     dom.profileName = document.getElementById("ws-profile-name");
@@ -1213,20 +1206,232 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Banque de boutons/actions (Phase 5)
+  // ---------------------------------------------------------------------
+  // Les boutons sous l'entry viennent de /api/workspace/entry-actions
+  // (persistes dans Postgres-jg_R, voir librairies/workflow_bank.py), plus
+  // jamais d'un tableau code en dur. "context" = l'utilisateur courant : cf.
+  // la note d'architecture dans workspace_routes.py (une bibliotheque
+  // personnelle, valable sur toutes ses conversations).
+
+  async function loadEntryActions() {
+    const { ok, data } = await api("/entry-actions");
+    if (!ok || !data.ok) return;
+    state.entryActions = data.entryActions;
+    if (state.selectedWidgetIndex != null && state.selectedWidgetIndex >= state.entryActions.length) {
+      state.selectedWidgetIndex = null;
+    }
+    renderActionWidgets();
+  }
+
   function renderActionWidgets() {
     dom.actionWidgets.innerHTML = "";
-    ACTION_WIDGETS.forEach((widget, index) => {
-      dom.actionWidgets.appendChild(
+    state.entryActions.forEach((entryAction, index) => {
+      const btn = el("button", {
+        type: "button",
+        class: `action-widget-btn${state.selectedWidgetIndex === index ? " active" : ""}`,
+        text: entryAction.displayName,
+        onclick: () => {
+          state.selectedWidgetIndex = state.selectedWidgetIndex === index ? null : index;
+          renderActionWidgets();
+        },
+      });
+      const menuBtn = el("button", {
+        type: "button",
+        class: "action-widget-menu-btn",
+        "aria-label": t("workspace.action_menu"),
+        text: "⋯",
+        onclick: (event) => {
+          event.stopPropagation();
+          openActionWidgetMenu(entryAction, menuBtn);
+        },
+      });
+      dom.actionWidgets.appendChild(el("div", { class: "action-widget-wrap" }, [btn, menuBtn]));
+    });
+  }
+
+  function openActionWidgetMenu(entryAction, anchorBtn) {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.rename"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showRenameEntryActionForm(entryAction, menu);
+        },
+      })
+    );
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        class: "danger-text",
+        text: t("workspace.remove"),
+        onclick: async (event) => {
+          event.stopPropagation();
+          closeContextMenu();
+          // "Enlever" ne retire QUE l'association a mon interface : l'action
+          // centrale, son workflow n8n et les autres utilisateurs qui
+          // l'utilisent restent intacts dans la banque (voir remove_entry_action).
+          await api(`/entry-actions/${entryAction.id}`, { method: "DELETE" });
+          loadEntryActions();
+        },
+      })
+    );
+    anchorBtn.parentElement.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  function showRenameEntryActionForm(entryAction, menu) {
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename") }));
+    const input = el("input", { type: "text" });
+    input.value = entryAction.displayName;
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
         el("button", {
           type: "button",
-          class: `action-widget-btn${state.selectedWidgetIndex === index ? " active" : ""}`,
-          text: widget.label,
-          onclick: () => {
-            state.selectedWidgetIndex = state.selectedWidgetIndex === index ? null : index;
-            renderActionWidgets();
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async (event) => {
+            event.stopPropagation();
+            const alias = input.value.trim();
+            if (!alias) return;
+            // Alias LOCAL uniquement : le nom de l'action centrale partagee
+            // n'est jamais modifie, donc les autres utilisateurs de la meme
+            // action ne voient jamais ce renommage (voir spec Phase 5 §15).
+            await api(`/entry-actions/${entryAction.id}`, { method: "PATCH", body: JSON.stringify({ alias }) });
+            closeContextMenu();
+            loadEntryActions();
           },
-        })
-      );
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+    input.select();
+  }
+
+  function openAddActionMenu() {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.add_action_button"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showCreateActionForm(menu);
+        },
+      })
+    );
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.choose_action_button"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showChooseActionForm(menu);
+        },
+      })
+    );
+    dom.addActionBtn.parentElement.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  function showCreateActionForm(menu) {
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.action_button_name") }));
+    const input = el("input", { type: "text", placeholder: t("workspace.action_button_name_placeholder") });
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async (event) => {
+            event.stopPropagation();
+            const name = input.value.trim();
+            if (!name) return;
+            const saveBtn = event.currentTarget;
+            saveBtn.disabled = true;
+            saveBtn.textContent = t("workspace.creating");
+            // Cree reellement l'action + son workflow n8n cote serveur
+            // (voir POST /action-bank -> librairies/n8n_client.py) : jamais
+            // simule cote frontend.
+            const created = await api("/action-bank", { method: "POST", body: JSON.stringify({ name }) });
+            if (!created.ok || !created.data.ok) {
+              saveBtn.disabled = false;
+              saveBtn.textContent = t("workspace.save");
+              showComposerError(created.data && created.data.error ? created.data.error : t("workspace.error_generic"));
+              return;
+            }
+            await api("/entry-actions", { method: "POST", body: JSON.stringify({ actionId: created.data.action.id }) });
+            closeContextMenu();
+            loadEntryActions();
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+  }
+
+  function showChooseActionForm(menu) {
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.choose_action_button") }));
+    const input = el("input", { type: "text", placeholder: t("workspace.search_actions_placeholder") });
+    const resultsBox = el("div", { class: "action-bank-results" });
+    menu.appendChild(el("div", { class: "project-create-form" }, [input]));
+    menu.appendChild(resultsBox);
+
+    async function runSearch() {
+      const { ok, data } = await api(`/action-bank?search=${encodeURIComponent(input.value.trim())}`);
+      resultsBox.innerHTML = "";
+      if (!ok || !data.ok || !data.actions.length) {
+        resultsBox.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_actions_found") }));
+        return;
+      }
+      data.actions.forEach((action) => {
+        resultsBox.appendChild(
+          el("button", {
+            type: "button",
+            text: action.name,
+            onclick: async (event) => {
+              event.stopPropagation();
+              // Reutilise l'action et son workflow existants : aucune
+              // recreation, seule l'association a mon interface est ajoutee
+              // (voir add_entry_action, deduplique cote serveur).
+              await api("/entry-actions", { method: "POST", body: JSON.stringify({ actionId: action.id }) });
+              closeContextMenu();
+              loadEntryActions();
+            },
+          })
+        );
+      });
+    }
+
+    input.addEventListener("input", runSearch);
+    input.addEventListener("click", (e) => e.stopPropagation());
+    runSearch();
+    input.focus();
+  }
+
+  function wireAddActionButton() {
+    dom.addActionBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openAddActionMenu();
     });
   }
 
@@ -1338,7 +1543,7 @@
     scrollToBottom();
 
     const requestId = uuid();
-    const widget = state.selectedWidgetIndex != null ? ACTION_WIDGETS[state.selectedWidgetIndex] : null;
+    const selectedEntryAction = state.selectedWidgetIndex != null ? state.entryActions[state.selectedWidgetIndex] : null;
     const payload = {
       conversationId: state.conversationId,
       model: state.model,
@@ -1347,11 +1552,11 @@
       sourceResultIds: state.sourceResultIds,
       requestId,
     };
-    // widget.action.id est null tant qu'aucune vraie action n8n n'est
-    // branchee sur ce widget (voir ACTION_WIDGETS) : on n'envoie alors rien,
-    // plutot que d'envoyer une action que le backend rejetterait.
-    if (widget && widget.action && widget.action.id) {
-      payload.action = widget.action;
+    // Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n
+    // cote backend (voir jobs.py) : jamais confondu avec le provider
+    // ChatGPT/Claude selectionne par ailleurs.
+    if (selectedEntryAction) {
+      payload.action = { id: selectedEntryAction.actionId, type: selectedEntryAction.actionId, parameters: {} };
     }
 
     const composerSnapshot = {
@@ -1482,6 +1687,7 @@
     wireModelSelector();
     wireFileUpload();
     wireComposer();
+    wireAddActionButton();
 
     dom.newProjectBtn.addEventListener("click", () => dom.projectForm.classList.toggle("hidden"));
     dom.projectCancelBtn.addEventListener("click", () => {
@@ -1510,7 +1716,7 @@
       if (cursor) cursor.remove();
     });
 
-    await Promise.all([loadProjects(), loadDiscussions(true)]);
+    await Promise.all([loadProjects(), loadDiscussions(true), loadEntryActions()]);
 
     renderInitialQuestion();
   }

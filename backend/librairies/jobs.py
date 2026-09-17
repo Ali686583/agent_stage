@@ -26,7 +26,7 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import workspace
+from librairies import workflow_bank, workspace
 from librairies.security import sign_file_token
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
@@ -46,6 +46,11 @@ N8N_WEBHOOK_CHATGPT_URL = os.environ.get("N8N_WEBHOOK_CHATGPT_URL", "")
 N8N_WEBHOOK_CLAUDE_URL = os.environ.get("N8N_WEBHOOK_CLAUDE_URL", "")
 N8N_WEBHOOK_SECRET = os.environ.get("N8N_WEBHOOK_SECRET", "")
 N8N_TIMEOUT_SECONDS = int(os.environ.get("N8N_TIMEOUT_SECONDS", "90"))
+# Meme instance n8n que N8N_API_URL (utilisee cote backend pour creer les
+# workflows de la banque, voir librairies/n8n_client.py) : sert ici a
+# reconstruire l'URL d'execution reelle d'un bouton de la banque a partir de
+# son webhook_path stocke dans Postgres-jg_R.
+N8N_API_URL = os.environ.get("N8N_API_URL", "").rstrip("/")
 
 
 def _fail(run_id: str, conversation_id: str, message_id: str, request_id: str, status: str, error: str) -> None:
@@ -70,10 +75,23 @@ def execute_workflow_run(
     source_result_ids: list[str],
     request_id: str,
 ) -> None:
-    webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
-    if not webhook_url:
-        _fail(run_id, conversation_id, user_message_id, request_id, "failed", "workflow_not_configured")
-        return
+    # Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n,
+    # jamais celui du provider ChatGPT/Claude : les deux systemes ne doivent
+    # jamais se confondre (voir le prompt qui a demande cette separation).
+    if action_id:
+        try:
+            workflow_record = workflow_bank.get_workflow_record_by_action(action_id)
+        except RuntimeError:
+            workflow_record = None
+        if not workflow_record or not workflow_record.get("webhookPath") or not N8N_API_URL:
+            _fail(run_id, conversation_id, user_message_id, request_id, "failed", "action_workflow_not_configured")
+            return
+        webhook_url = f"{N8N_API_URL}/webhook/{workflow_record['webhookPath']}"
+    else:
+        webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
+        if not webhook_url:
+            _fail(run_id, conversation_id, user_message_id, request_id, "failed", "workflow_not_configured")
+            return
 
     file_links = []
     for file_id in file_ids:

@@ -26,10 +26,12 @@ import os
 import time
 import uuid
 
+import requests
 from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
 
-from librairies import database, realtime, workspace
+from librairies import database, n8n_client, realtime, workflow_bank, workspace
 from librairies.jobs import execute_workflow_run, queue
+from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
 from librairies.security import hash_token, sign_file_token
 
@@ -431,6 +433,145 @@ def list_actions_route():
 
 
 # ---------------------------------------------------------------------------
+# Banque de boutons/actions (Phase 5) : persistee dans Postgres-jg_R via
+# librairies/workflow_bank.py, jamais dans la base principale ni cote client.
+#
+# Note d'architecture (deviation assumee par rapport a une lecture littérale
+# de la demande) : le "context_id" auquel une entry_action est rattachee est
+# ici l'utilisateur lui-meme (user["id"]), pas la conversation. Une nouvelle
+# discussion n'a pas encore d'id de conversation tant qu'aucun message n'a
+# ete envoye (voir sendMessage() cote frontend) : il n'existe donc pas de
+# conteneur stable auquel rattacher des boutons avant ce premier message. Le
+# choix le plus proche de la demande ("les boutons que JE veux voir sous MON
+# entry") est une bibliotheque personnelle par utilisateur, valable sur
+# toutes ses conversations. A adapter si un rattachement par conversation
+# est explicitement souhaite une fois qu'une conversation existe deja.
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/action-bank", methods=["GET"])
+def list_action_bank_route():
+    user, err = _require_user()
+    if err:
+        return err
+    search = str(request.args.get("search", ""))[:200]
+    try:
+        actions = workflow_bank.list_actions(search=search)
+    except RuntimeError:
+        return _error(503, "Banque de boutons non configuree.")
+    return jsonify(ok=True, actions=actions)
+
+
+@workspace_bp.route("/action-bank", methods=["POST"])
+@limiter.limit("20 per minute")
+def create_action_bank_route():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()[:100]
+    if not name:
+        return _error(400, "Nom du bouton requis.")
+
+    try:
+        n8n_info = n8n_client.create_action_workflow(name)
+    except N8nConfigError:
+        return _error(503, "Integration n8n non configuree (N8N_API_URL/N8N_API_KEY).")
+    except requests.exceptions.RequestException:
+        return _error(502, "Impossible de creer le workflow n8n pour ce bouton.")
+
+    try:
+        workflow_record = workflow_bank.create_workflow_record(
+            name=name,
+            n8n_workflow_id=n8n_info["n8nWorkflowId"],
+            webhook_path=n8n_info["webhookPath"],
+            status="active" if n8n_info["active"] else "draft",
+            editor_url=n8n_info["editorUrl"],
+        )
+        action = workflow_bank.create_action(name=name, created_by=user["id"], workflow_record_id=workflow_record["id"])
+    except RuntimeError:
+        return _error(503, "Banque de boutons non configuree.")
+
+    return jsonify(ok=True, action=action, workflowRecord=workflow_record)
+
+
+@workspace_bp.route("/action-bank/<action_id>", methods=["DELETE"])
+def delete_action_bank_route(action_id):
+    user, err = _require_user()
+    if err:
+        return err
+    action = workflow_bank.get_action(action_id)
+    if not action:
+        return _error(404, "Action introuvable.")
+    if action["createdBy"] != user["id"] and user.get("role") != "admin":
+        return _error(403, "Seul le createur ou un administrateur peut supprimer definitivement cette action.")
+    deleted = workflow_bank.delete_action(action_id)
+    if not deleted:
+        return _error(409, "Cette action est encore utilisee ailleurs : impossible de la supprimer definitivement.")
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/entry-actions", methods=["GET"])
+def list_entry_actions_route():
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        entry_actions = workflow_bank.list_entry_actions(context_id=user["id"])
+    except RuntimeError:
+        return _error(503, "Banque de boutons non configuree.")
+    return jsonify(ok=True, entryActions=entry_actions)
+
+
+@workspace_bp.route("/entry-actions", methods=["POST"])
+@limiter.limit("30 per minute")
+def add_entry_action_route():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    action_id = str(data.get("actionId", ""))
+    alias = data.get("alias")
+    if alias is not None:
+        alias = str(alias).strip()[:100] or None
+
+    action = workflow_bank.get_action(action_id)
+    if not action:
+        return _error(404, "Action introuvable.")
+
+    entry_action = workflow_bank.add_entry_action(
+        context_id=user["id"], action_id=action_id, created_by=user["id"], alias=alias
+    )
+    return jsonify(ok=True, entryAction=entry_action)
+
+
+@workspace_bp.route("/entry-actions/<entry_action_id>", methods=["PATCH"])
+def update_entry_action_route(entry_action_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if "alias" not in data:
+        return _error(400, "Rien a mettre a jour.")
+    alias = data.get("alias")
+    alias = str(alias).strip()[:100] if alias else None
+    ok = workflow_bank.rename_entry_action_alias(entry_action_id, context_id=user["id"], alias=alias)
+    if not ok:
+        return _error(404, "Bouton introuvable.")
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/entry-actions/<entry_action_id>", methods=["DELETE"])
+def remove_entry_action_route(entry_action_id):
+    user, err = _require_user()
+    if err:
+        return err
+    ok = workflow_bank.remove_entry_action(entry_action_id, context_id=user["id"])
+    if not ok:
+        return _error(404, "Bouton introuvable.")
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Resultats reutilisables
 # ---------------------------------------------------------------------------
 
@@ -572,7 +713,12 @@ def send_message_route():
     action_parameters = {}
     if action:
         action_id = str(action.get("id", ""))
-        if action_id not in ALLOWED_ACTIONS:
+        # Deux familles d'actions coexistent : l'ancienne liste statique
+        # ALLOWED_ACTIONS (jamais reellement branchee, id toujours null cote
+        # frontend jusqu'ici) et la nouvelle banque dynamique persistee dans
+        # Postgres-jg_R (Phase 5). On accepte l'une ou l'autre pour ne rien
+        # casser si l'ancienne liste venait a etre utilisee ailleurs.
+        if action_id not in ALLOWED_ACTIONS and not workflow_bank.get_action(action_id):
             return _error(400, "Action non autorisee.")
         action_parameters = action.get("parameters") or {}
 

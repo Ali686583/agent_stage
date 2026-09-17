@@ -30,7 +30,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from PIL import Image
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from librairies import database, workspace
+from librairies import database, workflow_bank, workspace
 from librairies.email_service import send_password_reset_email
 from librairies.rate_limit import limiter
 from librairies.security import generate_token, hash_token
@@ -63,6 +63,7 @@ limiter.init_app(app)
 app.register_blueprint(workspace_bp)
 
 database.init_db()
+workflow_bank.init_bank_db()
 
 
 # ---------------------------------------------------------------------------
