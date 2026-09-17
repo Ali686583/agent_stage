@@ -75,6 +75,10 @@ def init_db() -> None:
         # distincte de l'email de connexion qui ne change jamais ici.
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS display_name TEXT;")
         conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_reference TEXT;")
+        # Migration additive : role applicatif (standard/admin). Fondation
+        # pour les permissions futures (Phase 1 de l'espace collaboratif) ;
+        # aucune route n'en depend encore aujourd'hui.
+        conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'standard';")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sessions (
@@ -128,6 +132,29 @@ def init_db() -> None:
                 created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at         TIMESTAMPTZ NOT NULL DEFAULT now()
             );
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_participants (
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                user_id         TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                role            TEXT NOT NULL DEFAULT 'member',
+                added_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+                PRIMARY KEY (conversation_id, user_id)
+            );
+            """
+        )
+        # Backfill idempotent : toute conversation deja existante (creee avant
+        # l'introduction de cette table) obtient son createur comme 'owner'.
+        # Sans cette ligne, les conversations anterieures deviendraient
+        # inaccessibles a tout le monde (y compris leur createur) des que les
+        # routes se mettent a verifier l'appartenance.
+        conn.execute(
+            """
+            INSERT INTO conversation_participants (conversation_id, user_id, role)
+            SELECT id, created_by_user_id, 'owner' FROM conversations
+            ON CONFLICT (conversation_id, user_id) DO NOTHING;
             """
         )
         conn.execute(
@@ -228,6 +255,9 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_project_conversations_conv ON project_conversations (conversation_id);"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversation_participants_user ON conversation_participants (user_id);"
+        )
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments (message_id);"
         )
         conn.execute(
@@ -277,6 +307,7 @@ def _public_user(row: dict) -> dict:
         "email": row["email"],
         "displayName": display_name_for(row),
         "avatarUrl": avatar_url_for(row),
+        "role": row.get("role") or "standard",
     }
 
 
@@ -338,6 +369,21 @@ def authenticate_user(identifier: str, password: str) -> dict | None:
 def get_user_by_id(user_id: str) -> dict | None:
     with _db() as conn:
         row = conn.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
+    return _public_user(row) if row else None
+
+
+def get_user_by_identifier(identifier: str) -> dict | None:
+    """Resout un utilisateur par identifiant OU email, sans mot de passe
+    (meme lookup qu'authenticate_user). Utilise pour ajouter un participant
+    a une conversation a partir de ce que son proprietaire saisit."""
+    cleaned = (identifier or "").strip().lower()
+    if not cleaned:
+        return None
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM users WHERE username = %s OR email = %s",
+            (cleaned, cleaned),
+        ).fetchone()
     return _public_user(row) if row else None
 
 

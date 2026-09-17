@@ -160,7 +160,7 @@ def create_project_route():
 
 @workspace_bp.route("/projects/<project_id>/conversations", methods=["GET"])
 def list_project_conversations_route(project_id):
-    _user, err = _require_user()
+    user, err = _require_user()
     if err:
         return err
     if not workspace.project_exists(project_id):
@@ -168,7 +168,8 @@ def list_project_conversations_route(project_id):
     limit = request.args.get("limit", default=30, type=int)
     before = request.args.get("before")
     return jsonify(
-        ok=True, conversations=workspace.list_project_conversations(project_id, limit, before)
+        ok=True,
+        conversations=workspace.list_project_conversations(project_id, user["id"], limit, before),
     )
 
 
@@ -178,19 +179,23 @@ def list_project_conversations_route(project_id):
 
 @workspace_bp.route("/conversations", methods=["GET"])
 def list_conversations_route():
-    _user, err = _require_user()
+    user, err = _require_user()
     if err:
         return err
     limit = request.args.get("limit", default=30, type=int)
     before = request.args.get("before")
-    return jsonify(ok=True, conversations=workspace.list_conversations(limit, before))
+    return jsonify(ok=True, conversations=workspace.list_conversations(user["id"], limit, before))
 
 
 @workspace_bp.route("/conversations/<conversation_id>", methods=["GET"])
 def get_conversation_route(conversation_id):
-    _user, err = _require_user()
+    user, err = _require_user()
     if err:
         return err
+    if not workspace.is_participant(conversation_id, user["id"]):
+        # 404 plutot que 403 : ne pas reveler qu'une conversation existe a
+        # quelqu'un qui n'y a pas acces.
+        return _error(404, "Conversation introuvable.")
     conversation = workspace.get_conversation(conversation_id)
     if not conversation:
         return _error(404, "Conversation introuvable.")
@@ -207,6 +212,8 @@ def add_conversation_to_project_route(conversation_id):
     user, err = _require_user()
     if err:
         return err
+    if not workspace.is_participant(conversation_id, user["id"]):
+        return _error(404, "Conversation introuvable.")
     data = request.get_json(silent=True) or {}
     project_id = str(data.get("projectId", ""))
     if not project_id:
@@ -216,6 +223,58 @@ def add_conversation_to_project_route(conversation_id):
     except ValueError as exc:
         return _error(404, str(exc))
     return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Participants
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/conversations/<conversation_id>/participants", methods=["GET"])
+def list_participants_route(conversation_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not workspace.is_participant(conversation_id, user["id"]):
+        return _error(404, "Conversation introuvable.")
+    return jsonify(ok=True, participants=workspace.list_participants(conversation_id))
+
+
+@workspace_bp.route("/conversations/<conversation_id>/participants", methods=["POST"])
+@limiter.limit("20 per minute")
+def add_participant_route(conversation_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    identifier = str(data.get("identifier", ""))[:200].strip()
+    if not identifier:
+        return _error(400, "identifier requis.")
+    target = database.get_user_by_identifier(identifier)
+    if not target:
+        return _error(404, "Utilisateur introuvable.")
+    try:
+        participants = workspace.add_participant(conversation_id, user["id"], target["id"])
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except ValueError as exc:
+        return _error(404, str(exc))
+    return jsonify(ok=True, participants=participants)
+
+
+@workspace_bp.route("/conversations/<conversation_id>/participants/<target_user_id>", methods=["DELETE"])
+def remove_participant_route(conversation_id, target_user_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        participants = workspace.remove_participant(conversation_id, user["id"], target_user_id)
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    return jsonify(ok=True, participants=participants)
 
 
 @workspace_bp.route("/conversations/<conversation_id>", methods=["PATCH"])
@@ -453,6 +512,8 @@ def send_message_route():
     # redeclenche jamais un second workflow ni un second message utilisateur.
     existing_run = workspace.get_workflow_run_by_request_id(request_id)
     if existing_run:
+        if not workspace.is_participant(existing_run["conversationId"], user["id"]):
+            return _error(404, "Conversation introuvable.")
         if existing_run["status"] == "completed" and existing_run["resultId"]:
             result = workspace.get_result(existing_run["resultId"])
             return jsonify(
@@ -486,6 +547,8 @@ def send_message_route():
                 return _error(404, str(exc))
             conversation_id = conversation["id"]
         else:
+            if not workspace.is_participant(conversation_id, user["id"]):
+                return _error(404, "Conversation introuvable.")
             conversation = workspace.get_conversation(conversation_id)
             if not conversation:
                 return _error(404, "Conversation introuvable.")

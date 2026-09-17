@@ -126,6 +126,16 @@ def _public_result(row: dict) -> dict:
     }
 
 
+def _public_participant(row: dict) -> dict:
+    return {
+        "userId": row["user_id"],
+        "role": row["role"],
+        "displayName": row.get("live_name") or row["user_id"],
+        "avatarUrl": _avatar_url(row, avatar_key="live_avatar"),
+        "addedAt": row["added_at"].isoformat(),
+    }
+
+
 def _public_workflow_run(row: dict) -> dict:
     return {
         "id": row["id"],
@@ -229,7 +239,12 @@ def rename_project(project_id: str, user_id: str, name: str) -> dict:
     return get_project(project_id)
 
 
-def list_project_conversations(project_id: str, limit: int = 30, before: str | None = None) -> list[dict]:
+def list_project_conversations(
+    project_id: str, user_id: str, limit: int = 30, before: str | None = None
+) -> list[dict]:
+    """Meme filtre d'appartenance que list_conversations : un projet peut
+    contenir des conversations ajoutees par d'autres participants, on ne
+    renvoie jamais celles dont `user_id` n'est pas participant."""
     limit = max(1, min(limit, 100))
     with _db() as conn:
         if before:
@@ -237,20 +252,22 @@ def list_project_conversations(project_id: str, limit: int = 30, before: str | N
                 """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
                    FROM conversations c
                    JOIN project_conversations pc ON pc.conversation_id = c.id
+                   JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
                    WHERE pc.project_id = %s AND c.updated_at < %s
                    ORDER BY c.updated_at DESC LIMIT %s""",
-                (project_id, before, limit),
+                (user_id, project_id, before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
                    FROM conversations c
                    JOIN project_conversations pc ON pc.conversation_id = c.id
+                   JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
                    WHERE pc.project_id = %s
                    ORDER BY c.updated_at DESC LIMIT %s""",
-                (project_id, limit),
+                (user_id, project_id, limit),
             ).fetchall()
     return [_public_conversation(r) for r in rows]
 
@@ -290,25 +307,30 @@ def delete_project(project_id: str, user_id: str) -> bool:
 # Conversations
 # ---------------------------------------------------------------------------
 
-def list_conversations(limit: int = 30, before: str | None = None) -> list[dict]:
+def list_conversations(user_id: str, limit: int = 30, before: str | None = None) -> list[dict]:
+    """Ne renvoie que les conversations dont `user_id` est participant :
+    connaitre/deviner un conversation_id ne suffit jamais, et cette liste ne
+    doit jamais fuiter l'existence de conversations d'autres utilisateurs."""
     limit = max(1, min(limit, 100))
     with _db() as conn:
         if before:
             rows = conn.execute(
                 """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
                    FROM conversations c
+                   JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
                    WHERE c.updated_at < %s
                    ORDER BY c.updated_at DESC LIMIT %s""",
-                (before, limit),
+                (user_id, before, limit),
             ).fetchall()
         else:
             rows = conn.execute(
                 """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
                    FROM conversations c
+                   JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
                    ORDER BY c.updated_at DESC LIMIT %s""",
-                (limit,),
+                (user_id, limit),
             ).fetchall()
     return [_public_conversation(r) for r in rows]
 
@@ -333,6 +355,11 @@ def create_conversation(user_id: str, user_name: str, title: str, project_id: st
                VALUES (%s, %s, %s, %s)""",
             (conversation_id, title[:MAX_TITLE_LENGTH], user_id, user_name),
         )
+        conn.execute(
+            """INSERT INTO conversation_participants (conversation_id, user_id, role)
+               VALUES (%s, %s, 'owner')""",
+            (conversation_id, user_id),
+        )
         if project_id:
             if not conn.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,)).fetchone():
                 raise ValueError("Projet introuvable.")
@@ -347,6 +374,83 @@ def create_conversation(user_id: str, user_name: str, title: str, project_id: st
 def touch_conversation(conversation_id: str) -> None:
     with _db() as conn:
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
+
+
+# ---------------------------------------------------------------------------
+# Participants
+# ---------------------------------------------------------------------------
+
+def is_participant(conversation_id: str, user_id: str) -> bool:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+            (conversation_id, user_id),
+        ).fetchone()
+    return row is not None
+
+
+def list_participants(conversation_id: str) -> list[dict]:
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT cp.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+               FROM conversation_participants cp
+               JOIN users u ON u.id = cp.user_id
+               WHERE cp.conversation_id = %s
+               ORDER BY cp.added_at ASC""",
+            (conversation_id,),
+        ).fetchall()
+    return [_public_participant(r) for r in rows]
+
+
+def add_participant(conversation_id: str, actor_user_id: str, target_user_id: str) -> list[dict]:
+    """Ajoute target_user_id a la conversation. Seul un participant deja
+    'owner' peut inviter quelqu'un (le simple fait d'etre 'member' ne suffit
+    pas)."""
+    with _db() as conn:
+        actor_row = conn.execute(
+            "SELECT role FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+            (conversation_id, actor_user_id),
+        ).fetchone()
+        if not actor_row:
+            raise LookupError("Conversation introuvable.")
+        if actor_row["role"] != "owner":
+            raise PermissionError("Seul le proprietaire peut ajouter un participant.")
+        if not conn.execute("SELECT 1 FROM users WHERE id = %s", (target_user_id,)).fetchone():
+            raise ValueError("Utilisateur introuvable.")
+        conn.execute(
+            """INSERT INTO conversation_participants (conversation_id, user_id, role)
+               VALUES (%s, %s, 'member') ON CONFLICT DO NOTHING""",
+            (conversation_id, target_user_id),
+        )
+    return list_participants(conversation_id)
+
+
+def remove_participant(conversation_id: str, actor_user_id: str, target_user_id: str) -> list[dict]:
+    """Retire target_user_id. Seul un 'owner' peut retirer quelqu'un
+    d'autre ; un 'owner' ne peut jamais se retirer lui-meme s'il est le
+    dernier owner restant (la conversation deviendrait orpheline)."""
+    with _db() as conn:
+        actor_row = conn.execute(
+            "SELECT role FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+            (conversation_id, actor_user_id),
+        ).fetchone()
+        if not actor_row:
+            raise LookupError("Conversation introuvable.")
+        if actor_row["role"] != "owner":
+            raise PermissionError("Seul le proprietaire peut retirer un participant.")
+        if target_user_id == actor_user_id:
+            remaining_owners = conn.execute(
+                """SELECT count(*) AS n FROM conversation_participants
+                   WHERE conversation_id = %s AND role = 'owner' AND user_id != %s""",
+                (conversation_id, target_user_id),
+            ).fetchone()
+            if remaining_owners["n"] == 0:
+                raise PermissionError("Impossible de se retirer : dernier proprietaire de la conversation.")
+        conn.execute(
+            "DELETE FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
+            (conversation_id, target_user_id),
+        )
+    return list_participants(conversation_id)
 
 
 # ---------------------------------------------------------------------------
