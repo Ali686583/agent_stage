@@ -7,6 +7,12 @@
 
   const API = "/api/workspace";
 
+  // Garde-fou cote client pour une requete en attente d'une reponse
+  // asynchrone (Phase 4) : un peu plus que le timeout serveur (90s appel
+  // n8n + 30s marge du job) pour ne jamais se declencher avant une reponse
+  // legitime mais lente.
+  const PENDING_REQUEST_TIMEOUT_MS = 130000;
+
   // Widgets d'actions : de vrais boutons, jamais un menu deroulant.
   // Structure prete pour brancher une vraie action n8n plus tard (action.id
   // doit alors correspondre a l'allowlist du backend, cf. workspace_routes.py).
@@ -776,9 +782,9 @@
       // loader) avant tout, qu'elle vienne de ce meme onglet ou d'un autre
       // (message.requestId n'est present que sur les reponses assistant
       // issues du worker en arriere-plan, voir librairies/jobs.py).
-      if (message.requestId && state.pendingRequests.has(message.requestId)) {
-        state.pendingRequests.get(message.requestId).loadingRow.remove();
-        state.pendingRequests.delete(message.requestId);
+      if (message.requestId) {
+        const pending = resolvePendingRequest(message.requestId);
+        if (pending) pending.loadingRow.remove();
       }
       if (state.seenMessageIds.has(message.id)) return; // deja rendu localement (propre envoi) ou deja vu
       state.seenMessageIds.add(message.id);
@@ -811,9 +817,8 @@
       } catch (error) {
         return;
       }
-      const pending = data.requestId && state.pendingRequests.get(data.requestId);
+      const pending = data.requestId && resolvePendingRequest(data.requestId);
       if (!pending) return; // echec d'une requete d'un autre onglet/utilisateur : rien a faire ici
-      state.pendingRequests.delete(data.requestId);
       const statusMap = { n8n_timeout: "workspace.error_timeout", workflow_not_configured: "workspace.error_not_configured" };
       pending.showSendError(t(statusMap[data.error] || "workspace.error_generic"));
     });
@@ -1346,11 +1351,6 @@
     };
     resetComposer();
 
-    const { ok, data } = await api("/messages", { method: "POST", body: JSON.stringify(payload) });
-
-    state.sending = false;
-    updateSendButtonState();
-
     function showSendError(message) {
       loadingRow.remove();
       const statusRow = el("div", { class: "message-status error" }, [
@@ -1373,7 +1373,15 @@
       scrollToBottom();
     }
 
+    // L'etat "en cours" (bouton desactive, entry bloquee) dure jusqu'a la
+    // VRAIE reponse du provider (evenement SSE), pas juste jusqu'a la mise
+    // en file : un seul clic = un seul workflow, et on empeche toute
+    // nouvelle saisie avant que celui-ci n'ait reellement repondu.
+    const { ok, data } = await api("/messages", { method: "POST", body: JSON.stringify(payload) });
+
     if (!ok || !data.ok) {
+      state.sending = false;
+      updateSendButtonState();
       const statusMap = { 504: "workspace.error_timeout", 503: "workspace.error_not_configured" };
       showSendError(statusMap[data.status] ? t(statusMap[data.status]) : data.error ? data.error : t("workspace.error_generic"));
       return;
@@ -1383,6 +1391,8 @@
       // Requete deja completee lors d'une tentative precedente (meme
       // requestId rejoue) : sa reponse assistant a deja ete diffusee a
       // l'epoque, rien de nouveau a attendre ici.
+      state.sending = false;
+      updateSendButtonState();
       loadingRow.remove();
       return;
     }
@@ -1404,7 +1414,26 @@
     // potentiellement long) et arrivera plus tard via SSE, jamais dans cette
     // reponse HTTP. Le loader reste visible, rattache a cette requete : voir
     // connectRealtime() pour sa resolution (message.created / workflow.failed).
-    state.pendingRequests.set(requestId, { loadingRow, showSendError });
+    // Garde-fou : si aucune resolution n'arrive (SSE coupe, worker perdu),
+    // ne jamais laisser l'entry bloquee indefiniment.
+    const timeoutId = setTimeout(() => {
+      if (!state.pendingRequests.has(requestId)) return; // deja resolu entre-temps
+      state.pendingRequests.delete(requestId);
+      state.sending = false;
+      updateSendButtonState();
+      showSendError(t("workspace.error_timeout"));
+    }, PENDING_REQUEST_TIMEOUT_MS);
+    state.pendingRequests.set(requestId, { loadingRow, showSendError, timeoutId });
+  }
+
+  function resolvePendingRequest(requestId) {
+    const pending = state.pendingRequests.get(requestId);
+    if (!pending) return null;
+    clearTimeout(pending.timeoutId);
+    state.pendingRequests.delete(requestId);
+    state.sending = false;
+    updateSendButtonState();
+    return pending;
   }
 
   function showComposerError(message) {

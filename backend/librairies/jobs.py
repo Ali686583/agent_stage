@@ -91,12 +91,16 @@ def execute_workflow_run(
         )
 
     payload = {
-        "requestId": request_id,
+        # Contrat minimal cote n8n : prompt/provider/conversationId/userId.
+        "prompt": message_text,
+        "provider": model,
         "conversationId": conversation_id,
         "userId": user_id,
+        # Champs additionnels, deja utiles aux fonctionnalites existantes
+        # (documents joints, enchainement de resultats, actions) : a
+        # ignorer cote n8n si le workflow n'en a pas besoin.
+        "requestId": request_id,
         "userName": user_name,
-        "model": model,
-        "message": message_text,
         "fileIds": file_ids,
         "files": file_links,
         "sourceResultIds": source_result_ids,
