@@ -40,11 +40,12 @@
 
   <script src="theme.js"></script>
   <script>
-    // GIF fourni par l'utilisateur (contenu non modifie, seul loop=0 ->
-    // loop=1 a ete corrige pour qu'il ne reparte pas en boucle avant la
-    // redirection). Duree native ~6000ms, deja figee sur sa derniere frame
-    // (deja fondue en blanc) a la fin. Duree totale de la page portee a 7s.
-    const ANIMATION_DURATION_MS = 7000;
+    // GIF de l'utilisateur, retravaille : assemblage puis tenue courtes
+    // (les deux longs temps morts d'origine ont ete raccourcis), suivi
+    // d'un seul fondu continu du logo COMPLET (icone+texte ensemble) vers
+    // le blanc - plus d'etape ou le texte se retracte pour ne laisser que
+    // l'icone avant de la faire disparaitre. Duree native ~2100ms.
+    const ANIMATION_DURATION_MS = 2450;
     const FADE_MS = 350;
 
     const img = document.getElementById("intro-logo");
