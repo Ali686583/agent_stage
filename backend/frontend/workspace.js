@@ -602,6 +602,51 @@
 
   let activeContextMenu = null;
 
+  // Menu flottant independant (position: fixed), utilise pour la suppression
+  // definitive dans "Choisir un bouton" : ce menu doit rester visible meme
+  // si son bouton declencheur est dans .action-bank-results, qui a
+  // overflow-y:auto et couperait un .item-context-menu classique (position:
+  // absolute) ancre dans son propre flux. Coexiste avec activeContextMenu
+  // (le menu "Choisir un bouton" lui-meme reste ouvert par-dessous).
+  let activeFixedMenu = null;
+  function closeFixedMenu() {
+    if (activeFixedMenu && activeFixedMenu.parentElement) {
+      activeFixedMenu.parentElement.removeChild(activeFixedMenu);
+    }
+    activeFixedMenu = null;
+  }
+
+  function openActionBankDeleteMenu(action, anchorBtn, onDeleted) {
+    closeFixedMenu();
+    const rect = anchorBtn.getBoundingClientRect();
+    const menu = el("div", { class: "action-bank-fixed-menu" });
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${Math.max(8, rect.right - 200)}px`;
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        class: "danger-text",
+        text: t("workspace.delete_button_definitively"),
+        onclick: async (event) => {
+          event.stopPropagation();
+          closeFixedMenu();
+          // Suppression DEFINITIVE de la banque (pas juste "Retirer" de mon
+          // interface) : le serveur refuse si cette action est encore
+          // utilisee ailleurs (voir delete_action_bank_route / delete_action).
+          const { ok, data } = await api(`/action-bank/${action.id}`, { method: "DELETE" });
+          if (!ok || !data.ok) {
+            showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+            return;
+          }
+          if (onDeleted) onDeleted();
+        },
+      })
+    );
+    document.body.appendChild(menu);
+    activeFixedMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeFixedMenu, { once: true }), 0);
+  }
+
   function openConversationMenu(conversation, anchorBtn) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open" });
@@ -1422,21 +1467,31 @@
         return;
       }
       data.actions.forEach((action) => {
-        resultsBox.appendChild(
-          el("button", {
-            type: "button",
-            text: action.name,
-            onclick: async (event) => {
-              event.stopPropagation();
-              // Reutilise l'action et son workflow existants : aucune
-              // recreation, seule l'association a mon interface est ajoutee
-              // (voir add_entry_action, deduplique cote serveur).
-              await api("/entry-actions", { method: "POST", body: JSON.stringify({ actionId: action.id }) });
-              closeContextMenu();
-              loadEntryActions();
-            },
-          })
-        );
+        const chooseBtn = el("button", {
+          type: "button",
+          class: "action-bank-result-btn",
+          text: action.name,
+          onclick: async (event) => {
+            event.stopPropagation();
+            // Reutilise l'action et son workflow existants : aucune
+            // recreation, seule l'association a mon interface est ajoutee
+            // (voir add_entry_action, deduplique cote serveur).
+            await api("/entry-actions", { method: "POST", body: JSON.stringify({ actionId: action.id }) });
+            closeContextMenu();
+            loadEntryActions();
+          },
+        });
+        const menuBtn = el("button", {
+          type: "button",
+          class: "action-bank-result-menu-btn",
+          "aria-label": t("workspace.action_menu"),
+          text: "⋯",
+          onclick: (event) => {
+            event.stopPropagation();
+            openActionBankDeleteMenu(action, menuBtn, runSearch);
+          },
+        });
+        resultsBox.appendChild(el("div", { class: "action-bank-result-row" }, [chooseBtn, menuBtn]));
       });
     }
 

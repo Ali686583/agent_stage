@@ -122,6 +122,7 @@
       "workspace.no_actions_found": "Aucun bouton trouvé.",
       "workspace.rename": "Renommer",
       "workspace.open_in_n8n": "Ouvrir dans n8n",
+      "workspace.delete_button_definitively": "Supprimer définitivement",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -237,6 +238,7 @@
       "workspace.no_actions_found": "No button found.",
       "workspace.rename": "Rename",
       "workspace.open_in_n8n": "Open in n8n",
+      "workspace.delete_button_definitively": "Delete permanently",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -352,6 +354,7 @@
       "workspace.no_actions_found": "لم يتم العثور على أي زر.",
       "workspace.rename": "إعادة تسمية",
       "workspace.open_in_n8n": "فتح في n8n",
+      "workspace.delete_button_definitively": "حذف نهائي",
     },
   };
 

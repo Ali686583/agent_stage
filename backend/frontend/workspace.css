@@ -670,6 +670,47 @@ html, body {
 }
 .action-widget-menu-btn:hover { background: var(--color-border); }
 .action-bank-results { max-height: 220px; overflow-y: auto; }
+.action-bank-result-row { position: relative; display: flex; align-items: center; }
+.action-bank-result-row .action-bank-result-btn { flex: 1; min-width: 0; }
+.action-bank-result-menu-btn {
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-small);
+  opacity: 0;
+  flex-shrink: 0;
+}
+.action-bank-result-row:hover .action-bank-result-menu-btn { opacity: 1; }
+.action-bank-result-menu-btn:hover { background: var(--color-border); }
+
+/* Menu flottant (position: fixed) : place au clic via getBoundingClientRect,
+   pour ne jamais etre coupe par overflow-y:auto de .action-bank-results. */
+.action-bank-fixed-menu {
+  position: fixed;
+  min-width: 200px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-medium);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+  z-index: 1000;
+}
+.action-bank-fixed-menu button {
+  display: block;
+  width: 100%;
+  text-align: start;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font-size: 0.84rem;
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+.action-bank-fixed-menu button:hover { background: var(--color-accent-soft-bg); }
+.action-bank-fixed-menu button.danger-text { color: var(--color-error); }
 
 /* ---------------------------------------------------------------------
    Profil (avatar + dropdown, pattern MyBusiness) + "Plus d'options"
