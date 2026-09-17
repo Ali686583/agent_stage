@@ -177,6 +177,7 @@ html, body {
 .sidebar-list { display: flex; flex-direction: column; gap: 2px; padding-inline-start: 8px; }
 .sidebar-project-group { margin-bottom: 2px; }
 .sidebar-project-name {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
