@@ -69,6 +69,14 @@ ALLOWED_ACTIONS = {
     "generate_report",
 }
 
+# "Session commune" demandee explicitement : la banque de boutons est un
+# contexte UNIQUE, partage par tous les utilisateurs authentifies (au lieu
+# d'une bibliotheque personnelle par utilisateur). Consequence assumee et
+# signalee : renommer (alias) ou enlever un bouton affecte tout le monde,
+# puisqu'il n'existe plus qu'une seule ligne entry_actions par bouton, pas
+# une par utilisateur.
+SHARED_BUTTON_CONTEXT_ID = "shared"
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 workspace_bp = Blueprint("workspace", __name__, url_prefix="/api/workspace")
@@ -172,6 +180,21 @@ def list_conversations_route():
     limit = request.args.get("limit", default=30, type=int)
     before = request.args.get("before")
     return jsonify(ok=True, conversations=workspace.list_conversations(user["id"], limit, before))
+
+
+@workspace_bp.route("/conversations/shared", methods=["GET"])
+def get_shared_conversation_route():
+    """Conversation "commune" : une seule conversation partagee par TOUS les
+    utilisateurs authentifies (session commune), cree au premier acces si
+    elle n'existe pas encore. Route statique enregistree AVANT la route
+    dynamique /conversations/<conversation_id> pour ne jamais etre
+    interceptee par elle."""
+    user, err = _require_user()
+    if err:
+        return err
+    conversation = workspace.get_or_create_shared_conversation(user["id"], user["displayName"])
+    workspace.is_participant(conversation["id"], user["id"])  # auto-rejoint si pas deja membre
+    return jsonify(ok=True, conversation=conversation)
 
 
 @workspace_bp.route("/conversations/<conversation_id>", methods=["GET"])
@@ -516,7 +539,7 @@ def list_entry_actions_route():
     if err:
         return err
     try:
-        entry_actions = workflow_bank.list_entry_actions(context_id=user["id"])
+        entry_actions = workflow_bank.list_entry_actions(context_id=SHARED_BUTTON_CONTEXT_ID)
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
     return jsonify(ok=True, entryActions=entry_actions)
@@ -539,7 +562,7 @@ def add_entry_action_route():
         return _error(404, "Action introuvable.")
 
     entry_action = workflow_bank.add_entry_action(
-        context_id=user["id"], action_id=action_id, created_by=user["id"], alias=alias
+        context_id=SHARED_BUTTON_CONTEXT_ID, action_id=action_id, created_by=user["id"], alias=alias
     )
     return jsonify(ok=True, entryAction=entry_action)
 
@@ -554,7 +577,7 @@ def update_entry_action_route(entry_action_id):
         return _error(400, "Rien a mettre a jour.")
     alias = data.get("alias")
     alias = str(alias).strip()[:100] if alias else None
-    ok = workflow_bank.rename_entry_action_alias(entry_action_id, context_id=user["id"], alias=alias)
+    ok = workflow_bank.rename_entry_action_alias(entry_action_id, context_id=SHARED_BUTTON_CONTEXT_ID, alias=alias)
     if not ok:
         return _error(404, "Bouton introuvable.")
     return jsonify(ok=True)
@@ -565,7 +588,7 @@ def remove_entry_action_route(entry_action_id):
     user, err = _require_user()
     if err:
         return err
-    ok = workflow_bank.remove_entry_action(entry_action_id, context_id=user["id"])
+    ok = workflow_bank.remove_entry_action(entry_action_id, context_id=SHARED_BUTTON_CONTEXT_ID)
     if not ok:
         return _error(404, "Bouton introuvable.")
     return jsonify(ok=True)

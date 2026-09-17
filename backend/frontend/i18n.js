@@ -123,6 +123,7 @@
       "workspace.rename": "Renommer",
       "workspace.open_in_n8n": "Ouvrir dans n8n",
       "workspace.delete_button_definitively": "Supprimer définitivement",
+      "workspace.shared_conversation": "👥 Discussion commune",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -239,6 +240,7 @@
       "workspace.rename": "Rename",
       "workspace.open_in_n8n": "Open in n8n",
       "workspace.delete_button_definitively": "Delete permanently",
+      "workspace.shared_conversation": "👥 Shared conversation",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -355,6 +357,7 @@
       "workspace.rename": "إعادة تسمية",
       "workspace.open_in_n8n": "فتح في n8n",
       "workspace.delete_button_definitively": "حذف نهائي",
+      "workspace.shared_conversation": "👥 محادثة مشتركة",
     },
   };
 

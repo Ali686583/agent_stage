@@ -227,6 +227,16 @@ html, body {
 .sidebar-item-menu-btn.forced-visible { opacity: 1; }
 .sidebar-item-menu-btn:hover { background: var(--color-border); }
 
+.sidebar-shared-conversation-btn {
+  width: 100%;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-text);
+  text-align: start;
+  margin-bottom: 6px;
+}
+
 .sidebar-load-more {
   font-size: 0.8rem;
   color: var(--color-accent-text);

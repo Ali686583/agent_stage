@@ -79,6 +79,7 @@ def _public_conversation(row: dict) -> dict:
         "createdByAvatarUrl": _avatar_url(row),
         "createdAt": row["created_at"].isoformat(),
         "updatedAt": row["updated_at"].isoformat(),
+        "isShared": bool(row.get("is_shared")),
     }
 
 
@@ -376,6 +377,39 @@ def create_conversation(user_id: str, user_name: str, title: str, project_id: st
     return get_conversation(conversation_id)
 
 
+def get_or_create_shared_conversation(user_id: str, user_name: str) -> dict:
+    """
+    Conversation "commune" : une seule et meme conversation, partagee entre
+    TOUS les utilisateurs authentifies, sans invitation explicite requise
+    (contrairement aux conversations normales de la Phase 1). Cree la
+    conversation une seule fois (idempotent : si elle existe deja, la
+    reutilise telle quelle, jamais de doublon).
+    """
+    with _db() as conn:
+        row = conn.execute(
+            """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+               FROM conversations c
+               LEFT JOIN users u ON u.id = c.created_by_user_id
+               WHERE c.is_shared = true
+               ORDER BY c.created_at ASC LIMIT 1""",
+        ).fetchone()
+        if row:
+            return _public_conversation(row)
+
+        conversation_id = new_id("conv")
+        conn.execute(
+            """INSERT INTO conversations (id, title, created_by_user_id, created_by_name, is_shared)
+               VALUES (%s, %s, %s, %s, true)""",
+            (conversation_id, "Discussion commune", user_id, user_name),
+        )
+        conn.execute(
+            """INSERT INTO conversation_participants (conversation_id, user_id, role)
+               VALUES (%s, %s, 'owner') ON CONFLICT DO NOTHING""",
+            (conversation_id, user_id),
+        )
+    return get_conversation(conversation_id)
+
+
 def touch_conversation(conversation_id: str) -> None:
     with _db() as conn:
         conn.execute("UPDATE conversations SET updated_at = now() WHERE id = %s", (conversation_id,))
@@ -391,7 +425,23 @@ def is_participant(conversation_id: str, user_id: str) -> bool:
             "SELECT 1 FROM conversation_participants WHERE conversation_id = %s AND user_id = %s",
             (conversation_id, user_id),
         ).fetchone()
-    return row is not None
+        if row:
+            return True
+        # Conversation commune ("session commune" demandee explicitement) :
+        # n'importe quel utilisateur authentifie en devient automatiquement
+        # participant des son premier acces, plutot que d'exiger une
+        # invitation explicite comme pour les conversations normales.
+        shared = conn.execute(
+            "SELECT is_shared FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if shared and shared["is_shared"]:
+            conn.execute(
+                """INSERT INTO conversation_participants (conversation_id, user_id, role)
+                   VALUES (%s, %s, 'member') ON CONFLICT DO NOTHING""",
+                (conversation_id, user_id),
+            )
+            return True
+    return False
 
 
 def list_participants(conversation_id: str) -> list[dict]:

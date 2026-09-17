@@ -143,6 +143,7 @@
     dom.projectCreateBtn = document.getElementById("ws-project-create-btn");
     dom.discussionsList = document.getElementById("ws-discussions-list");
     dom.newDiscussionBtn = document.getElementById("ws-new-discussion-btn");
+    dom.sharedConversationBtn = document.getElementById("ws-shared-conversation-btn");
     dom.centralColumn = document.getElementById("ws-central-column");
     dom.conversationArea = document.getElementById("ws-conversation-area");
     dom.composer = document.getElementById("ws-composer");
@@ -764,6 +765,17 @@
     resetComposer();
     renderInitialQuestion();
     document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
+  }
+
+  async function openSharedConversation() {
+    // "Session commune" : une seule conversation, partagee par tous les
+    // utilisateurs authentifies, creee au premier acces si necessaire
+    // (voir workspace.get_or_create_shared_conversation cote serveur).
+    const { ok, data } = await api("/conversations/shared");
+    if (!ok || !data.ok) return;
+    await openConversation(data.conversation.id);
+    document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
+    dom.sharedConversationBtn.classList.add("active");
   }
 
   async function openConversation(conversationId) {
@@ -1774,6 +1786,7 @@
 
     dom.projectsHeader.addEventListener("click", () => toggleSection(dom.projectsSection));
     dom.newDiscussionBtn.addEventListener("click", startNewDiscussion);
+    dom.sharedConversationBtn.addEventListener("click", openSharedConversation);
 
     renderActionWidgets();
 

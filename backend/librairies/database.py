@@ -134,6 +134,10 @@ def init_db() -> None:
             );
             """
         )
+        # Migration additive : conversation "commune" partagee entre tous les
+        # utilisateurs (session commune demandee explicitement), distincte
+        # d'une conversation privee avec invitation explicite (Phase 1).
+        conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT false;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_participants (
