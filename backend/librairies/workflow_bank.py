@@ -50,8 +50,28 @@ def _db():
 
 
 def init_bank_db() -> None:
-    """Cree les tables si elles n'existent pas encore. A appeler au demarrage."""
+    """
+    Cree les tables si elles n'existent pas encore. A appeler au demarrage.
+
+    Verrou consultatif Postgres autour de la creation : avec plusieurs
+    workers gunicorn (-w 2) qui importent ce module en meme temps au tout
+    premier demarrage (tables encore inexistantes), deux `CREATE TABLE IF
+    NOT EXISTS` concurrents peuvent tous les deux passer le test d'existence
+    avant que l'un des deux ne committe, et Postgres leve alors une
+    UniqueViolation sur son catalogue interne (pg_type) au lieu d'ignorer
+    silencieusement la creation en double. Observe en production sur cette
+    meme base : le crash du worker perdant a fait redemarrer tout le
+    conteneur, et seul le redemarrage suivant (tables deja creees par
+    l'autre worker) a reussi. Le verrou serialise cette section pour que ça
+    n'arrive plus jamais, meme sur une base totalement vierge.
+    """
     with _db() as conn:
+        conn.execute("SELECT pg_advisory_lock(727001727001);")
+        _create_tables(conn)
+        conn.execute("SELECT pg_advisory_unlock(727001727001);")
+
+
+def _create_tables(conn) -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS workflow_records (
