@@ -365,7 +365,7 @@ def send_message_route():
             return _error(404, "Resultat source introuvable.")
 
     # Idempotence : un meme requestId rejoue (retry reseau, double-clic) ne
-    # redeclenche jamais un second workflow.
+    # redeclenche jamais un second workflow ni un second message utilisateur.
     existing_run = workspace.get_workflow_run_by_request_id(request_id)
     if existing_run:
         if existing_run["status"] == "completed" and existing_run["resultId"]:
@@ -377,42 +377,55 @@ def send_message_route():
                 blocks=result["response"].get("blocks", []),
                 replay=True,
             )
-        return _error(409, "Cette requete est deja en cours de traitement.")
+        if existing_run["status"] == "running":
+            return _error(409, "Cette requete est deja en cours de traitement.")
 
-    is_new_conversation = not conversation_id
-    if is_new_conversation:
-        try:
-            conversation = workspace.create_conversation(
-                user["id"], user["username"], workspace.derive_title(message_text), project_id
-            )
-        except ValueError as exc:
-            return _error(404, str(exc))
-        conversation_id = conversation["id"]
-    else:
+        # status 'failed' ou 'timeout' : on retente sur le MEME run et le
+        # MEME message utilisateur (deja enregistres lors de la 1re tentative),
+        # sans rien dupliquer en base.
+        run_id = workspace.retry_workflow_run(request_id)
+        if run_id is None:
+            return _error(409, "Cette requete est deja en cours de traitement.")
+        conversation_id = existing_run["conversationId"]
         conversation = workspace.get_conversation(conversation_id)
-        if not conversation:
-            return _error(404, "Conversation introuvable.")
+        user_message = workspace.get_message(existing_run["messageId"]) if existing_run["messageId"] else None
+        is_new_conversation = False
+    else:
+        is_new_conversation = not conversation_id
+        if is_new_conversation:
+            try:
+                conversation = workspace.create_conversation(
+                    user["id"], user["username"], workspace.derive_title(message_text), project_id
+                )
+            except ValueError as exc:
+                return _error(404, str(exc))
+            conversation_id = conversation["id"]
+        else:
+            conversation = workspace.get_conversation(conversation_id)
+            if not conversation:
+                return _error(404, "Conversation introuvable.")
 
-    user_message = workspace.add_message(
-        conversation_id=conversation_id,
-        user_id=user["id"],
-        author_name=user["username"],
-        role="user",
-        content=message_text,
-        model=model,
-        action_id=action_id,
-    )
-    if file_ids:
-        workspace.link_files_to_message(user_message["id"], file_ids)
-    workspace.touch_conversation(conversation_id)
+        user_message = workspace.add_message(
+            conversation_id=conversation_id,
+            user_id=user["id"],
+            author_name=user["username"],
+            role="user",
+            content=message_text,
+            model=model,
+            action_id=action_id,
+        )
+        if file_ids:
+            workspace.link_files_to_message(user_message["id"], file_ids)
+        workspace.touch_conversation(conversation_id)
 
-    run = workspace.start_workflow_run(conversation_id, user_message["id"], user["id"], model, request_id)
-    if run is None:
-        return _error(409, "Cette requete est deja en cours de traitement.")
+        run = workspace.start_workflow_run(conversation_id, user_message["id"], user["id"], model, request_id)
+        if run is None:
+            return _error(409, "Cette requete est deja en cours de traitement.")
+        run_id = run["id"]
 
     webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
     if not webhook_url:
-        workspace.complete_workflow_run(run["id"], status="failed", error="workflow_not_configured")
+        workspace.complete_workflow_run(run_id, status="failed", error="workflow_not_configured")
         return _error(503, f"Le workflow n8n pour {model} n'est pas encore configure.")
 
     file_links = []
@@ -421,7 +434,7 @@ def send_message_route():
         try:
             token = _sign_file_token(file_id, expires_at)
         except RuntimeError:
-            workspace.complete_workflow_run(run["id"], status="failed", error="file_signing_not_configured")
+            workspace.complete_workflow_run(run_id, status="failed", error="file_signing_not_configured")
             return _error(503, "Signature de fichiers non configuree.")
         file_links.append(
             {
@@ -453,15 +466,15 @@ def send_message_route():
         n8n_response.raise_for_status()
         n8n_data = n8n_response.json()
     except requests.exceptions.Timeout:
-        workspace.complete_workflow_run(run["id"], status="timeout", error="n8n timeout")
+        workspace.complete_workflow_run(run_id, status="timeout", error="n8n timeout")
         return _error(504, "Le workflow n'a pas repondu a temps.")
     except Exception as exc:
-        workspace.complete_workflow_run(run["id"], status="failed", error=str(exc)[:500])
+        workspace.complete_workflow_run(run_id, status="failed", error=str(exc)[:500])
         return _error(502, "Le workflow a echoue.")
 
     blocks = n8n_data.get("blocks")
     if not isinstance(blocks, list) or not blocks:
-        workspace.complete_workflow_run(run["id"], status="failed", error="empty_response")
+        workspace.complete_workflow_run(run_id, status="failed", error="empty_response")
         return _error(502, "Reponse vide du workflow.")
 
     result = workspace.create_result(
@@ -489,7 +502,7 @@ def send_message_route():
     )
     workspace.touch_conversation(conversation_id)
     workspace.complete_workflow_run(
-        run["id"], status="completed", result_id=result["id"], n8n_execution_id=n8n_data.get("executionId")
+        run_id, status="completed", result_id=result["id"], n8n_execution_id=n8n_data.get("executionId")
     )
 
     return jsonify(

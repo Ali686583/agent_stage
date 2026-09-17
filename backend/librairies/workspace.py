@@ -463,6 +463,22 @@ def start_workflow_run(
     return {"id": run_id}
 
 
+def retry_workflow_run(request_id: str) -> str | None:
+    """Reutilise un run existant tombe en echec/timeout (meme request_id)
+    pour une nouvelle tentative, plutot que d'en creer un second - request_id
+    est UNIQUE. Renvoie l'id du run remis en 'running', ou None si aucun run
+    failed/timeout ne correspond (deja termine, ou toujours en cours)."""
+    with _db() as conn:
+        row = conn.execute(
+            """UPDATE workflow_runs
+               SET status = 'running', error = NULL, completed_at = NULL, started_at = now()
+               WHERE request_id = %s AND status IN ('failed', 'timeout')
+               RETURNING id""",
+            (request_id,),
+        ).fetchone()
+    return row["id"] if row else None
+
+
 def complete_workflow_run(
     run_id: str,
     status: str,
