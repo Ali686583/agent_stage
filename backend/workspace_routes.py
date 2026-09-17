@@ -218,6 +218,25 @@ def add_conversation_to_project_route(conversation_id):
     return jsonify(ok=True)
 
 
+@workspace_bp.route("/conversations/<conversation_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+def rename_conversation_route(conversation_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", ""))[:200]
+    try:
+        conversation = workspace.rename_conversation(conversation_id, user["id"], title)
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    return jsonify(ok=True, conversation=conversation)
+
+
 @workspace_bp.route("/conversations/<conversation_id>", methods=["DELETE"])
 def delete_conversation_route(conversation_id):
     user, err = _require_user()

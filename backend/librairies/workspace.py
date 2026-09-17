@@ -418,6 +418,27 @@ def list_messages(conversation_id: str, limit: int = 50, before: str | None = No
     return [_public_message(r) for r in rows]
 
 
+def rename_conversation(conversation_id: str, user_id: str, title: str) -> dict:
+    cleaned = (title or "").strip().replace("<", "").replace(">", "")
+    if not cleaned:
+        raise ValueError("Le titre de la conversation ne peut pas etre vide.")
+    if len(cleaned) > MAX_TITLE_LENGTH:
+        raise ValueError(f"Le titre de la conversation doit faire moins de {MAX_TITLE_LENGTH} caracteres.")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT created_by_user_id FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("Conversation introuvable.")
+        if row["created_by_user_id"] != user_id:
+            raise PermissionError("Seul le createur peut renommer cette conversation.")
+        conn.execute(
+            "UPDATE conversations SET title = %s, updated_at = now() WHERE id = %s",
+            (cleaned, conversation_id),
+        )
+    return get_conversation(conversation_id)
+
+
 def delete_conversation(conversation_id: str, user_id: str) -> bool:
     """Supprime une conversation et tout ce qui lui est rattache (messages,
     pieces jointes, resultats, workflow_runs, associations aux projets) via

@@ -626,6 +626,16 @@
       menu.appendChild(
         el("button", {
           type: "button",
+          text: t("workspace.rename_conversation"),
+          onclick: (event) => {
+            event.stopPropagation();
+            showRenameConversationForm(conversation, menu);
+          },
+        })
+      );
+      menu.appendChild(
+        el("button", {
+          type: "button",
           class: "danger-text",
           text: t("workspace.delete_conversation"),
           onclick: (event) => {
@@ -645,6 +655,44 @@
     anchorBtn.parentElement.appendChild(menu);
     activeContextMenu = menu;
     setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  function showRenameConversationForm(conversation, menu) {
+    // Meme raison que showRenameProjectForm : bloquer la propagation pour
+    // qu'interagir avec le formulaire ne ferme pas le menu.
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename_conversation") }));
+    const input = el("input", { type: "text", value: conversation.title || "" });
+    input.value = conversation.title || "";
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async (event) => {
+            event.stopPropagation();
+            const title = input.value.trim();
+            if (!title) return;
+            const { ok } = await api(`/conversations/${conversation.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ title }),
+            });
+            closeContextMenu();
+            if (ok) {
+              loadDiscussions(true);
+              if (state.conversationId === conversation.id) state.conversationTitle = title;
+            }
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+    input.select();
   }
 
   function closeContextMenu() {

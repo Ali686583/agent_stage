@@ -111,6 +111,7 @@
       "workspace.no_permission": "Action non autorisée.",
       "workspace.rename_project": "Renommer le projet",
       "workspace.rename_file": "Renommer le fichier",
+      "workspace.rename_conversation": "Renommer la conversation",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -215,6 +216,7 @@
       "workspace.no_permission": "Not allowed.",
       "workspace.rename_project": "Rename project",
       "workspace.rename_file": "Rename file",
+      "workspace.rename_conversation": "Rename conversation",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -319,6 +321,7 @@
       "workspace.no_permission": "غير مسموح.",
       "workspace.rename_project": "إعادة تسمية المشروع",
       "workspace.rename_file": "إعادة تسمية الملف",
+      "workspace.rename_conversation": "إعادة تسمية المحادثة",
     },
   };
 
