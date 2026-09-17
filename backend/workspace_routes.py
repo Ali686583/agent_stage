@@ -246,6 +246,25 @@ def delete_project_route(project_id):
     return jsonify(ok=True)
 
 
+@workspace_bp.route("/projects/<project_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+def rename_project_route(project_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", ""))[:200]
+    try:
+        project = workspace.rename_project(project_id, user["id"], name)
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    return jsonify(ok=True, project=project)
+
+
 # ---------------------------------------------------------------------------
 # Actions autorisees
 # ---------------------------------------------------------------------------
@@ -325,6 +344,25 @@ def download_file_route(file_id):
     if not workspace.user_can_access_file(file_id, user["id"]):
         return _error(403, "Acces refuse.")
     return _serve_file(file_id)
+
+
+@workspace_bp.route("/files/<file_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+def rename_file_route(file_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", ""))[:200]
+    try:
+        file = workspace.rename_file(file_id, user["id"], name)
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except ValueError as exc:
+        return _error(400, str(exc))
+    return jsonify(ok=True, file=file)
 
 
 @workspace_bp.route("/files/<file_id>/signed", methods=["GET"])

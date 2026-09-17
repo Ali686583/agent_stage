@@ -109,6 +109,8 @@
       "workspace.delete_conversation": "Supprimer la conversation",
       "workspace.delete_project": "Supprimer le projet",
       "workspace.no_permission": "Action non autorisée.",
+      "workspace.rename_project": "Renommer le projet",
+      "workspace.rename_file": "Renommer le fichier",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -211,6 +213,8 @@
       "workspace.delete_conversation": "Delete conversation",
       "workspace.delete_project": "Delete project",
       "workspace.no_permission": "Not allowed.",
+      "workspace.rename_project": "Rename project",
+      "workspace.rename_file": "Rename file",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -313,6 +317,8 @@
       "workspace.delete_conversation": "حذف المحادثة",
       "workspace.delete_project": "حذف المشروع",
       "workspace.no_permission": "غير مسموح.",
+      "workspace.rename_project": "إعادة تسمية المشروع",
+      "workspace.rename_file": "إعادة تسمية الملف",
     },
   };
 

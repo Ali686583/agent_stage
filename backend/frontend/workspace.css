@@ -60,19 +60,20 @@ html, body {
   overflow-y: auto;
 }
 
-/* Petite encoche/languette sur le bord droit, angles arrondis, une simple
-   fleche a l'interieur - jamais un gros bouton rond ni flottant. */
+/* Encoche en forme de trapeze aux angles arrondis (dessinee en SVG : un
+   clip-path/border-radius CSS ne peut pas arrondir les coins d'un trapeze).
+   La forme est une couche de fond (.sidebar-notch-shape) ; la fleche est une
+   seconde couche par-dessus, seule a tourner selon l'etat ouvert/ferme. */
 .sidebar-notch {
   position: absolute;
   top: 50%;
   inset-inline-start: 100%;
   transform: translateY(-50%);
-  width: 20px;
-  height: 44px;
-  background: var(--color-topbar-bg);
-  border: 1px solid var(--color-border);
-  border-inline-start: 0;
-  border-radius: 0 999px 999px 0;
+  width: 22px;
+  height: 46px;
+  padding: 0;
+  border: 0;
+  background: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -81,9 +82,23 @@ html, body {
   z-index: 5;
   transition: inset-inline-start 0.2s ease;
 }
-:root[dir="rtl"] .sidebar-notch { border-radius: 999px 0 0 999px; }
-.sidebar-notch svg { width: 13px; height: 13px; transition: transform 0.2s ease; }
-.workspace-sidebar.collapsed ~ .sidebar-notch svg { transform: rotate(180deg); }
+.sidebar-notch-shape {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: var(--color-topbar-bg);
+  stroke: var(--color-border);
+  stroke-width: 1.2;
+}
+:root[dir="rtl"] .sidebar-notch-shape { transform: scaleX(-1); }
+.notch-arrow {
+  position: relative;
+  width: 13px;
+  height: 13px;
+  transition: transform 0.2s ease;
+}
+.workspace-sidebar.collapsed ~ .sidebar-notch .notch-arrow { transform: rotate(180deg); }
 
 .sidebar-section { margin-bottom: 4px; }
 .sidebar-section-header {

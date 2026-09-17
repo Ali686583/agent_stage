@@ -191,6 +191,44 @@ def project_exists(project_id: str) -> bool:
     return row is not None
 
 
+def get_project(project_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute(
+            """
+            SELECT p.*, count(DISTINCT pc.conversation_id) AS conversation_count,
+                   COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+            FROM projects p
+            LEFT JOIN project_conversations pc ON pc.project_id = p.id
+            LEFT JOIN users u ON u.id = p.created_by_user_id
+            WHERE p.id = %s
+            GROUP BY p.id, u.display_name, u.email, u.avatar_reference
+            """,
+            (project_id,),
+        ).fetchone()
+    return _public_project(row) if row else None
+
+
+def rename_project(project_id: str, user_id: str, name: str) -> dict:
+    cleaned = (name or "").strip().replace("<", "").replace(">", "")
+    if not cleaned:
+        raise ValueError("Le nom du projet ne peut pas etre vide.")
+    if len(cleaned) > MAX_PROJECT_NAME_LENGTH:
+        raise ValueError(f"Le nom du projet doit faire moins de {MAX_PROJECT_NAME_LENGTH} caracteres.")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT created_by_user_id FROM projects WHERE id = %s", (project_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("Projet introuvable.")
+        if row["created_by_user_id"] != user_id:
+            raise PermissionError("Seul le createur peut renommer ce projet.")
+        conn.execute(
+            "UPDATE projects SET name = %s, updated_at = now() WHERE id = %s",
+            (cleaned, project_id),
+        )
+    return get_project(project_id)
+
+
 def list_project_conversations(project_id: str, limit: int = 30, before: str | None = None) -> list[dict]:
     limit = max(1, min(limit, 100))
     with _db() as conn:
@@ -417,6 +455,28 @@ def get_file(file_id: str) -> dict | None:
     with _db() as conn:
         row = conn.execute("SELECT * FROM files WHERE id = %s", (file_id,)).fetchone()
     return _public_file(row) if row else None
+
+
+def rename_file(file_id: str, user_id: str, name: str) -> dict:
+    """Renomme uniquement le nom d'AFFICHAGE (original_name). file_id et
+    storage_reference ne changent jamais : aucun autre enregistrement
+    (message_attachments, workflows n8n en cours, liens signes deja emis)
+    n'est donc affecte."""
+    cleaned = (name or "").strip().replace("<", "").replace(">", "")
+    if not cleaned:
+        raise ValueError("Le nom du fichier ne peut pas etre vide.")
+    if len(cleaned) > 200:
+        raise ValueError("Le nom du fichier doit faire moins de 200 caracteres.")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT uploaded_by_user_id FROM files WHERE id = %s", (file_id,)
+        ).fetchone()
+        if not row:
+            raise LookupError("Fichier introuvable.")
+        if row["uploaded_by_user_id"] != user_id:
+            raise PermissionError("Seul l'auteur du fichier peut le renommer.")
+        conn.execute("UPDATE files SET original_name = %s WHERE id = %s", (cleaned, file_id))
+    return get_file(file_id)
 
 
 def get_file_storage_reference(file_id: str) -> str | None:

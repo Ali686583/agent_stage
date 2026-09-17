@@ -458,6 +458,16 @@
       menu.appendChild(
         el("button", {
           type: "button",
+          text: t("workspace.rename_project"),
+          onclick: (event) => {
+            event.stopPropagation();
+            showRenameProjectForm(project, menu);
+          },
+        })
+      );
+      menu.appendChild(
+        el("button", {
+          type: "button",
           class: "danger-text",
           text: t("workspace.delete_project"),
           onclick: (event) => {
@@ -476,6 +486,42 @@
     anchorEl.appendChild(menu);
     activeContextMenu = menu;
     setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  function showRenameProjectForm(project, menu) {
+    // Le menu se ferme sur tout clic exterieur (voir openProjectMenu) : on
+    // bloque la propagation ici pour qu'interagir avec le formulaire
+    // (cliquer dans le champ, etc.) ne le fasse pas disparaitre.
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename_project") }));
+    const input = el("input", { type: "text", value: project.name });
+    input.value = project.name;
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async (event) => {
+            event.stopPropagation();
+            const name = input.value.trim();
+            if (!name) return;
+            const { ok } = await api(`/projects/${project.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ name }),
+            });
+            closeContextMenu();
+            if (ok) await loadProjects();
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+    input.select();
   }
 
   // ---------------------------------------------------------------------
@@ -695,11 +741,83 @@
   }
 
   function fileChipReadOnly(file) {
-    return el(
+    const nameSpan = el("span", { class: "file-chip-name", text: `📎 ${file.name}` });
+    const nameLink = el(
       "a",
-      { class: "file-chip", href: `${API}/files/${file.id}`, target: "_blank", rel: "noopener" },
-      [el("span", { class: "file-chip-name", text: `📎 ${file.name}` })]
+      { href: `${API}/files/${file.id}`, target: "_blank", rel: "noopener", style: "color:inherit;text-decoration:none;flex:1;min-width:0;" },
+      [nameSpan]
     );
+    const chip = el("div", { class: "file-chip", style: "position:relative;" }, [nameLink]);
+    if (file.uploadedByUserId === state.user.id) {
+      chip.appendChild(
+        el("button", {
+          type: "button",
+          "aria-label": t("workspace.conversation_menu"),
+          text: "⋯",
+          onclick: (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openFileMenu(file, chip, (newName) => {
+              nameSpan.textContent = `📎 ${newName}`;
+            });
+          },
+        })
+      );
+    }
+    return chip;
+  }
+
+  function openFileMenu(file, anchorEl, onRenamed) {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.rename_file"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showRenameFileForm(file, menu, onRenamed);
+        },
+      })
+    );
+    anchorEl.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+  }
+
+  function showRenameFileForm(file, menu, onRenamed) {
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename_file") }));
+    const input = el("input", { type: "text" });
+    input.value = file.name;
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: () => closeContextMenu() }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async () => {
+            const name = input.value.trim();
+            if (!name) return;
+            const { ok, data } = await api(`/files/${file.id}`, {
+              method: "PATCH",
+              body: JSON.stringify({ name }),
+            });
+            closeContextMenu();
+            if (ok && data.ok) {
+              file.name = data.file.name;
+              if (onRenamed) onRenamed(data.file.name);
+            }
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+    input.select();
   }
 
   const RICH_RENDERERS = {
@@ -1122,6 +1240,18 @@
     dom.newDiscussionBtn.addEventListener("click", startNewDiscussion);
 
     renderActionWidgets();
+
+    // La phrase initiale est ecrite par le typewriter, pas par le systeme
+    // data-i18n declaratif : sans ce listener, changer de langue en cours
+    // de route (FR<->AR) ne la mettait pas a jour tant qu'on ne relancait
+    // pas une nouvelle discussion.
+    document.addEventListener("agentstage:langchange", () => {
+      if (!dom.centralColumn.classList.contains("is-empty")) return;
+      const span = dom.conversationArea.querySelector(".initial-question span");
+      if (span) span.textContent = t("workspace.initial_question");
+      const cursor = dom.conversationArea.querySelector(".typewriter-cursor");
+      if (cursor) cursor.remove();
+    });
 
     await Promise.all([loadProjects(), loadDiscussions(true)]);
 
