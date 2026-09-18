@@ -377,6 +377,15 @@ def create_conversation(user_id: str, user_name: str, title: str, project_id: st
     return get_conversation(conversation_id)
 
 
+_SHARED_CONVERSATION_QUERY = """
+    SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+    FROM conversations c
+    LEFT JOIN users u ON u.id = c.created_by_user_id
+    WHERE c.is_shared = true
+    ORDER BY c.created_at ASC LIMIT 1
+"""
+
+
 def get_or_create_shared_conversation(user_id: str, user_name: str) -> dict:
     """
     Conversation "commune" : une seule et meme conversation, partagee entre
@@ -384,30 +393,37 @@ def get_or_create_shared_conversation(user_id: str, user_name: str) -> dict:
     (contrairement aux conversations normales de la Phase 1). Cree la
     conversation une seule fois (idempotent : si elle existe deja, la
     reutilise telle quelle, jamais de doublon).
+
+    Course concurrente geree explicitement : si deux utilisateurs appellent
+    cette fonction au tout premier acces (avant qu'aucune conversation
+    commune n'existe), un seul INSERT reussit reellement (index unique
+    partiel idx_conversations_one_shared, voir database.py) ; l'autre est
+    ignore (ON CONFLICT DO NOTHING) et relit la conversation gagnante au
+    lieu d'en creer une seconde. Sans cette gestion, deux utilisateurs
+    pouvaient se retrouver chacun dans SA PROPRE conversation "commune",
+    vide de l'autre cote - exactement le bug observe en production.
     """
     with _db() as conn:
-        row = conn.execute(
-            """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
-               FROM conversations c
-               LEFT JOIN users u ON u.id = c.created_by_user_id
-               WHERE c.is_shared = true
-               ORDER BY c.created_at ASC LIMIT 1""",
-        ).fetchone()
+        row = conn.execute(_SHARED_CONVERSATION_QUERY).fetchone()
         if row:
             return _public_conversation(row)
 
         conversation_id = new_id("conv")
         conn.execute(
             """INSERT INTO conversations (id, title, created_by_user_id, created_by_name, is_shared)
-               VALUES (%s, %s, %s, %s, true)""",
+               VALUES (%s, %s, %s, %s, true)
+               ON CONFLICT (is_shared) WHERE is_shared = true DO NOTHING""",
             (conversation_id, "Discussion commune", user_id, user_name),
         )
-        conn.execute(
-            """INSERT INTO conversation_participants (conversation_id, user_id, role)
-               VALUES (%s, %s, 'owner') ON CONFLICT DO NOTHING""",
-            (conversation_id, user_id),
-        )
-    return get_conversation(conversation_id)
+        row = conn.execute(_SHARED_CONVERSATION_QUERY).fetchone()
+        if row["id"] == conversation_id:
+            # C'est bien notre INSERT qui a gagne la course : on en devient owner.
+            conn.execute(
+                """INSERT INTO conversation_participants (conversation_id, user_id, role)
+                   VALUES (%s, %s, 'owner') ON CONFLICT DO NOTHING""",
+                (conversation_id, user_id),
+            )
+    return get_conversation(row["id"])
 
 
 def touch_conversation(conversation_id: str) -> None:
