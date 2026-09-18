@@ -316,7 +316,13 @@ def delete_project(project_id: str, user_id: str) -> bool:
 def list_conversations(user_id: str, limit: int = 30, before: str | None = None) -> list[dict]:
     """Ne renvoie que les conversations dont `user_id` est participant :
     connaitre/deviner un conversation_id ne suffit jamais, et cette liste ne
-    doit jamais fuiter l'existence de conversations d'autres utilisateurs."""
+    doit jamais fuiter l'existence de conversations d'autres utilisateurs.
+
+    La conversation commune (is_shared) est volontairement exclue d'ici :
+    elle a deja son propre acces dedie dans l'interface ("Discussion
+    commune"), et l'afficher EN PLUS dans cette liste normale a cause un
+    bug reel en production (confusion -> suppression accidentelle de la
+    conversation commune via le menu "..." de son entree en double)."""
     limit = max(1, min(limit, 100))
     with _db() as conn:
         if before:
@@ -325,7 +331,7 @@ def list_conversations(user_id: str, limit: int = 30, before: str | None = None)
                    FROM conversations c
                    JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
-                   WHERE c.updated_at < %s
+                   WHERE c.updated_at < %s AND c.is_shared = false
                    ORDER BY c.updated_at DESC LIMIT %s""",
                 (user_id, before, limit),
             ).fetchall()
@@ -335,6 +341,7 @@ def list_conversations(user_id: str, limit: int = 30, before: str | None = None)
                    FROM conversations c
                    JOIN conversation_participants cp ON cp.conversation_id = c.id AND cp.user_id = %s
                    LEFT JOIN users u ON u.id = c.created_by_user_id
+                   WHERE c.is_shared = false
                    ORDER BY c.updated_at DESC LIMIT %s""",
                 (user_id, limit),
             ).fetchall()
@@ -656,10 +663,18 @@ def delete_conversation(conversation_id: str, user_id: str) -> bool:
     createur peut supprimer. Renvoie False si la conversation n'existe pas."""
     with _db() as conn:
         row = conn.execute(
-            "SELECT created_by_user_id FROM conversations WHERE id = %s", (conversation_id,)
+            "SELECT created_by_user_id, is_shared FROM conversations WHERE id = %s", (conversation_id,)
         ).fetchone()
         if not row:
             return False
+        # La conversation commune n'appartient a personne en particulier :
+        # meme son createur d'origine ne peut pas la supprimer pour tout le
+        # monde. Bug reel observe en production sans cette garde : elle a
+        # ete supprimee par megarde (elle apparaissait aussi dans la liste
+        # normale des discussions), effacant son historique pour tous les
+        # utilisateurs qui la partageaient.
+        if row["is_shared"]:
+            raise PermissionError("La conversation commune ne peut pas etre supprimee.")
         if row["created_by_user_id"] != user_id:
             raise PermissionError("Seul le createur peut supprimer cette conversation.")
         conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
