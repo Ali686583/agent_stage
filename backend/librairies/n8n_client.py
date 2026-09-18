@@ -316,12 +316,41 @@ def create_action_workflow(name: str) -> dict:
     }
 
 
+def deactivate_workflow(n8n_workflow_id: str) -> bool:
+    """Desactive un workflow n8n existant (rend son webhook de production
+    injoignable). Symetrique d'activate_workflow ; necessaire avant une
+    suppression (voir delete_workflow ci-dessous)."""
+    _require_config()
+    response = requests.post(
+        f"{N8N_API_URL}/api/v1/workflows/{n8n_workflow_id}/deactivate",
+        headers={"X-N8N-API-KEY": N8N_API_KEY},
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return bool(data.get("active"))
+
+
 def delete_workflow(n8n_workflow_id: str) -> bool:
     """Supprime definitivement un workflow n8n. Best-effort : appele
-    uniquement lors d'un nettoyage explicite d'un bouton de la banque
-    (voir workflow_bank.purge_actions_named) ; l'appelant doit decider quoi
-    faire d'un echec (ne jamais bloquer la suppression cote base pour ca)."""
+    uniquement lors d'un nettoyage explicite d'un bouton de la banque (voir
+    workflow_bank.purge_actions_named et workspace_routes.delete_action_bank_route) ;
+    l'appelant doit decider quoi faire d'un echec (ne jamais bloquer la
+    suppression cote base pour ca).
+
+    Desactive d'abord le workflow : decouvert pendant la validation E2E que
+    cette instance n8n refuse purement et simplement de supprimer un
+    workflow encore publie/actif (409 "Cannot delete a published workflow.
+    Unpublish it before deleting."), ce qui faisait echouer silencieusement
+    CHAQUE tentative de nettoyage (tous les workflows de boutons sont actives
+    des leur creation, voir create_action_workflow). Un echec de la
+    desactivation n'empeche pas de tenter quand meme la suppression (au cas
+    ou le workflow serait deja inactif pour une autre raison)."""
     _require_config()
+    try:
+        deactivate_workflow(n8n_workflow_id)
+    except requests.exceptions.RequestException:
+        pass
     response = requests.delete(
         f"{N8N_API_URL}/api/v1/workflows/{n8n_workflow_id}",
         headers={"X-N8N-API-KEY": N8N_API_KEY},
