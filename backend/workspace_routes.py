@@ -503,6 +503,18 @@ def create_action_bank_route():
     name = str(data.get("name", "")).strip()[:100]
     if not name:
         return _error(400, "Nom du bouton requis.")
+    description = data.get("description")
+    if description is not None:
+        description = str(description).strip()[:2000] or None
+    instruction = data.get("instruction")
+    if instruction is not None:
+        instruction = str(instruction).strip()[:20000] or None
+    required_integrations = data.get("requiredIntegrations")
+    if required_integrations is not None and not isinstance(required_integrations, list):
+        return _error(400, "requiredIntegrations invalide.")
+    required_files = data.get("requiredFiles")
+    if required_files is not None and not isinstance(required_files, list):
+        return _error(400, "requiredFiles invalide.")
 
     try:
         n8n_info = n8n_client.create_action_workflow(name)
@@ -519,11 +531,75 @@ def create_action_bank_route():
             status="active" if n8n_info["active"] else "draft",
             editor_url=n8n_info["editorUrl"],
         )
-        action = workflow_bank.create_action(name=name, created_by=user["id"], workflow_record_id=workflow_record["id"])
+        action = workflow_bank.create_action(
+            name=name,
+            created_by=user["id"],
+            workflow_record_id=workflow_record["id"],
+            description=description,
+            instruction=instruction,
+            required_integrations=required_integrations,
+            required_files=required_files,
+        )
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
 
     return jsonify(ok=True, action=action, workflowRecord=workflow_record)
+
+
+@workspace_bp.route("/action-bank/<action_id>", methods=["PATCH"])
+@limiter.limit("30 per minute")
+def update_action_bank_route(action_id):
+    """Edition partagee (nom/description/instruction/integrations/fichiers
+    requis) avec verrouillage optimiste : le client doit renvoyer la
+    `version` qu'il a lue en dernier ; en cas de conflit (quelqu'un d'autre a
+    modifie entre-temps), renvoie 409 + l'action actuelle a jour, jamais un
+    ecrasement silencieux (mission "boutons SPS" §12)."""
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    if "version" not in data:
+        return _error(400, "version requise (verrouillage optimiste).")
+    try:
+        expected_version = int(data.get("version"))
+    except (TypeError, ValueError):
+        return _error(400, "version invalide.")
+
+    name = data.get("name")
+    if name is not None:
+        name = str(name).strip()[:100] or None
+    description = data.get("description")
+    if description is not None:
+        description = str(description).strip()[:2000] or None
+    instruction = data.get("instruction")
+    if instruction is not None:
+        instruction = str(instruction).strip()[:20000] or None
+    required_integrations = data.get("requiredIntegrations")
+    if required_integrations is not None and not isinstance(required_integrations, list):
+        return _error(400, "requiredIntegrations invalide.")
+    required_files = data.get("requiredFiles")
+    if required_files is not None and not isinstance(required_files, list):
+        return _error(400, "requiredFiles invalide.")
+
+    try:
+        updated = workflow_bank.update_action_details(
+            action_id,
+            actor_user_id=user["id"],
+            expected_version=expected_version,
+            name=name,
+            description=description,
+            instruction=instruction,
+            required_integrations=required_integrations,
+            required_files=required_files,
+        )
+    except LookupError as exc:
+        return _error(404, str(exc))
+    except workflow_bank.VersionConflictError as exc:
+        current = workflow_bank.get_action(action_id)
+        return jsonify(ok=False, error=str(exc), current=current), 409
+    except RuntimeError:
+        return _error(503, "Banque de boutons non configuree.")
+    return jsonify(ok=True, action=updated)
 
 
 @workspace_bp.route("/action-bank/<action_id>", methods=["DELETE"])

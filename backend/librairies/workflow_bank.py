@@ -99,6 +99,21 @@ def _create_tables(conn) -> None:
             );
             """
         )
+        # Migration additive (mission "boutons SPS") : metadonnees etendues
+        # d'un bouton partage, au-dela du simple nom -- description affichee,
+        # instruction/prompt systeme de reference (jamais un secret, donc pas
+        # besoin du systeme de credentials pour ce champ), integrations et
+        # fichiers requis, comportement de routage modele, et verrouillage
+        # optimiste (version) pour que deux editions concurrentes du meme
+        # bouton partage ne s'ecrasent jamais silencieusement (voir
+        # update_action_details ci-dessous).
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS description TEXT;")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS instruction TEXT;")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS required_integrations JSONB NOT NULL DEFAULT '[]'::jsonb;")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS required_files JSONB NOT NULL DEFAULT '[]'::jsonb;")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS model_routing TEXT NOT NULL DEFAULT 'respects_selector';")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS version INTEGER NOT NULL DEFAULT 1;")
+        conn.execute("ALTER TABLE actions ADD COLUMN IF NOT EXISTS last_edited_by TEXT;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS entry_actions (
@@ -143,6 +158,14 @@ def _public_action(row) -> dict:
         "createdBy": row["created_by"],
         "status": row["status"],
         "createdAt": row["created_at"].isoformat(),
+        "description": row.get("description"),
+        "instruction": row.get("instruction"),
+        "requiredIntegrations": row.get("required_integrations") or [],
+        "requiredFiles": row.get("required_files") or [],
+        "modelRouting": row.get("model_routing") or "respects_selector",
+        "version": row.get("version", 1),
+        "lastEditedBy": row.get("last_edited_by"),
+        "updatedAt": row["updated_at"].isoformat() if row.get("updated_at") else None,
     }
 
 
@@ -204,16 +227,37 @@ def get_workflow_record_by_action(action_id: str) -> dict | None:
 # Actions (banque centrale)
 # ---------------------------------------------------------------------------
 
-def create_action(name: str, created_by: str, workflow_record_id: str) -> dict:
+def create_action(
+    name: str,
+    created_by: str,
+    workflow_record_id: str,
+    description: str | None = None,
+    instruction: str | None = None,
+    required_integrations: list | None = None,
+    required_files: list | None = None,
+    model_routing: str = "respects_selector",
+) -> dict:
     action_id = str(uuid.uuid4())
     with _db() as conn:
         row = conn.execute(
             """
-            INSERT INTO actions (id, name, workflow_record_id, created_by)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO actions
+                (id, name, workflow_record_id, created_by, description, instruction,
+                 required_integrations, required_files, model_routing)
+            VALUES (%s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s)
             RETURNING *;
             """,
-            (action_id, name, workflow_record_id, created_by),
+            (
+                action_id,
+                name,
+                workflow_record_id,
+                created_by,
+                description,
+                instruction,
+                Jsonb(required_integrations or []),
+                Jsonb(required_files or []),
+                model_routing,
+            ),
         ).fetchone()
         return _public_action(row)
 
@@ -259,6 +303,74 @@ def delete_action(action_id: str) -> bool:
             return False
         conn.execute("DELETE FROM actions WHERE id = %s;", (action_id,))
         return True
+
+
+class VersionConflictError(RuntimeError):
+    """Levee quand expected_version ne correspond plus a la version en base :
+    quelqu'un d'autre a deja modifie ce bouton partage entre-temps. L'appelant
+    doit relire la version actuelle et laisser l'utilisateur reappliquer son
+    edition consciemment, jamais ecraser silencieusement (mission §12)."""
+
+
+def update_action_details(
+    action_id: str,
+    actor_user_id: str,
+    expected_version: int,
+    name: str | None = None,
+    description: str | None = None,
+    instruction: str | None = None,
+    required_integrations: list | None = None,
+    required_files: list | None = None,
+) -> dict:
+    """Edition partagee d'un bouton (nom/description/instruction/...) avec
+    verrouillage optimiste : la mise a jour n'est appliquee que si `version`
+    en base vaut encore `expected_version` (lu par l'appelant juste avant).
+    Sinon : VersionConflictError, jamais un ecrasement silencieux d'une
+    modification plus recente faite par un autre utilisateur (mission §12).
+    N'importe quel utilisateur authentifie peut editer un bouton partage
+    (meme modele de confiance que le reste de la banque -- aucun systeme de
+    permissions granulaire n'existe dans cette application ; "droits
+    d'edition" = etre un utilisateur authentifie de cet espace collaboratif)."""
+    with _db() as conn:
+        current = conn.execute("SELECT * FROM actions WHERE id = %s;", (action_id,)).fetchone()
+        if not current:
+            raise LookupError("Bouton introuvable.")
+        if current["version"] != expected_version:
+            raise VersionConflictError(
+                f"Ce bouton a ete modifie entre-temps (version actuelle {current['version']}, "
+                f"attendue {expected_version})."
+            )
+        row = conn.execute(
+            """
+            UPDATE actions
+            SET name = COALESCE(%s, name),
+                description = %s,
+                instruction = %s,
+                required_integrations = %s::jsonb,
+                required_files = %s::jsonb,
+                last_edited_by = %s,
+                version = version + 1,
+                updated_at = now()
+            WHERE id = %s AND version = %s
+            RETURNING *;
+            """,
+            (
+                name,
+                description if description is not None else current["description"],
+                instruction if instruction is not None else current["instruction"],
+                Jsonb(required_integrations if required_integrations is not None else (current["required_integrations"] or [])),
+                Jsonb(required_files if required_files is not None else (current["required_files"] or [])),
+                actor_user_id,
+                action_id,
+                expected_version,
+            ),
+        ).fetchone()
+        if not row:
+            # Course tres etroite entre le SELECT ci-dessus et cet UPDATE :
+            # quelqu'un d'autre vient de committer une modification entre les
+            # deux. Meme traitement qu'un conflit detecte plus tot.
+            raise VersionConflictError("Ce bouton a ete modifie entre-temps par quelqu'un d'autre.")
+        return _public_action(row)
 
 
 # ---------------------------------------------------------------------------
