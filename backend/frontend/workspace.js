@@ -1171,6 +1171,8 @@
   }
 
   function markdownLiteToHtml(content) {
+    // Repli minimal si marked/DOMPurify n'ont pas pu charger (CDN bloque,
+    // reseau) : jamais un ecran vide, juste un rendu moins riche.
     let html = escapeHtml(content || "");
     html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
@@ -1179,15 +1181,54 @@
     return html;
   }
 
+  // Rendu "rapport professionnel" des reponses des boutons/n8n : ces
+  // workflows renvoient un unique bloc markdown (titres, tableaux, listes,
+  // gras...) en texte brut - jusqu'ici affiche via markdownLiteToHtml, qui ne
+  // comprenait ni les titres ni les tableaux ni les listes. On utilise
+  // desormais un vrai parseur markdown (marked, charge en CDN dans
+  // page2.html) puis on assainit le HTML resultant (DOMPurify) avant de
+  // l'injecter : le contenu vient de reponses IA potentiellement influencees
+  // par du texte externe (document joint, page web recuperee par un
+  // workflow), jamais une source de confiance a traiter comme du HTML brut.
+  // Ne change jamais CE que l'IA repond, uniquement comment c'est affiche.
+  function renderMarkdownToHtml(content) {
+    const text = content || "";
+    if (!window.marked || !window.DOMPurify) {
+      return markdownLiteToHtml(text);
+    }
+    try {
+      const rawHtml = window.marked.parse(text, { breaks: true, gfm: true });
+      return window.DOMPurify.sanitize(rawHtml, { ADD_ATTR: ["target", "rel"] });
+    } catch (error) {
+      return markdownLiteToHtml(text);
+    }
+  }
+
   function renderMarkdownBlock(block) {
     const div = el("div", { class: "block-markdown" });
-    div.innerHTML = markdownLiteToHtml(block.content || "");
+    div.innerHTML = renderMarkdownToHtml(block.content || "");
+    // Les tableaux markdown (frequents dans les reponses des boutons SPS/
+    // Patents) doivent pouvoir defiler horizontalement sans jamais faire
+    // deborder la bulle de message ni la page (meme regle que les blocs
+    // "table" structures, voir .block-table-wrap).
+    div.querySelectorAll("table").forEach((table) => {
+      const wrap = el("div", { class: "md-table-wrap" });
+      table.replaceWith(wrap);
+      wrap.appendChild(table);
+    });
+    // Un lien qui ressemble a une source/reference (texte court, domaine
+    // externe) est mis en valeur comme une "puce" plutot qu'un lien bleu
+    // classique, pour se rapprocher visuellement d'un vrai rapport.
+    div.querySelectorAll("a[href]").forEach((a) => {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    });
     return div;
   }
 
   function renderCalloutBlock(block) {
     const div = el("div", { class: "block-callout" });
-    div.innerHTML = markdownLiteToHtml(block.content || "");
+    div.innerHTML = renderMarkdownToHtml(block.content || "");
     return div;
   }
 
