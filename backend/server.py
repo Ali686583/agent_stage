@@ -30,7 +30,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from PIL import Image
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from librairies import connections_bank, database, n8n_client, workflow_bank, workspace
+from librairies import connections_bank, database, workflow_bank, workspace
 from librairies.email_service import send_password_reset_email
 from librairies.rate_limit import limiter
 from librairies.security import generate_token, hash_token
@@ -65,20 +65,6 @@ app.register_blueprint(workspace_bp)
 database.init_db()
 workflow_bank.init_bank_db()
 connections_bank.init_connections_db()
-
-# Nettoyage ponctuel explicitement demande : le bouton "Analyser pdf" cree
-# pendant la preuve a 2 comptes de cette session n'est plus necessaire.
-# Idempotent (no-op des la 2e execution) : sans danger a laisser demarrer
-# a chaque boot, mais peut etre retire une fois la suppression confirmee.
-try:
-    _leftover_n8n_ids = workflow_bank.purge_actions_named(["Analyser pdf", "Analyser"])
-    for _n8n_id in _leftover_n8n_ids:
-        try:
-            n8n_client.delete_workflow(_n8n_id)
-        except Exception:
-            pass  # best-effort : la ligne base est deja supprimee dans tous les cas
-except RuntimeError:
-    pass  # banque de boutons non configuree sur cet environnement
 
 
 # ---------------------------------------------------------------------------
