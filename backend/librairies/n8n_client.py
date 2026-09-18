@@ -126,12 +126,33 @@ def _skeleton_workflow_definition(name: str, webhook_path: str) -> dict:
     }
 
 
+def activate_workflow(n8n_workflow_id: str) -> bool:
+    """Active un workflow n8n existant (rend son webhook de production
+    joignable). Utilise juste apres la creation du squelette d'un nouveau
+    bouton : sans ca, son webhook ne repond a AUCUNE requete (meme pas le
+    message placeholder "pas encore configure"), ce qui ressemble a une
+    panne plutot qu'a un bouton neuf qui attend sa vraie logique."""
+    _require_config()
+    response = requests.post(
+        f"{N8N_API_URL}/api/v1/workflows/{n8n_workflow_id}/activate",
+        headers={"X-N8N-API-KEY": N8N_API_KEY},
+        timeout=20,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return bool(data.get("active"))
+
+
 def create_action_workflow(name: str) -> dict:
     """
     Cree reellement un nouveau workflow n8n (squelette Webhook/If/Respond) via
-    l'API de gestion n8n. Renvoie {n8n_workflow_id, webhook_path, editor_url,
-    active}. Ne simule jamais un resultat : toute erreur HTTP remonte telle
-    quelle a l'appelant.
+    l'API de gestion n8n, puis l'active immediatement pour que son webhook
+    de production reponde des la creation du bouton (voir activate_workflow
+    ci-dessus). Renvoie {n8n_workflow_id, webhook_path, editor_url, active}.
+    Ne simule jamais un resultat : toute erreur HTTP a la creation remonte
+    telle quelle a l'appelant ; un echec de L'ACTIVATION en revanche
+    n'annule pas la creation du bouton (deja reussie) -- il reste alors
+    inactif comme avant ce correctif, sans bloquer l'utilisateur.
     """
     _require_config()
     webhook_path = f"action-{uuid.uuid4()}"
@@ -146,12 +167,19 @@ def create_action_workflow(name: str) -> dict:
     response.raise_for_status()
     data = response.json()
     workflow_id = data["id"]
+    active = bool(data.get("active"))
+
+    if not active:
+        try:
+            active = activate_workflow(workflow_id)
+        except requests.exceptions.RequestException:
+            active = False
 
     return {
         "n8nWorkflowId": workflow_id,
         "webhookPath": webhook_path,
         "editorUrl": f"{N8N_API_URL}/workflow/{workflow_id}",
-        "active": bool(data.get("active")),
+        "active": active,
     }
 
 
