@@ -26,7 +26,7 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import workflow_bank, workspace
+from librairies import connections_bank, platform_client, workflow_bank, workspace
 from librairies.security import sign_file_token
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
@@ -73,6 +73,7 @@ def execute_workflow_run(
     message_text: str,
     file_ids: list[str],
     source_result_ids: list[str],
+    connection_ids: list[str],
     request_id: str,
 ) -> None:
     # Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n,
@@ -108,6 +109,52 @@ def execute_workflow_run(
             }
         )
 
+    # Plateformes/API (nouveau bouton de l'entry) : une connexion
+    # selectionnee n'est appelee que si elle est aussi PERTINENTE par
+    # rapport a la demande ou au bouton selectionne (prompt §17-22) --
+    # jamais uniquement parce qu'elle est cochee. Calcule et applique
+    # cote SERVEUR uniquement : jamais confie au frontend (§44).
+    platform_data = []
+    if connection_ids:
+        action_names = []
+        if action_id:
+            try:
+                selected_action = workflow_bank.get_action(action_id)
+            except RuntimeError:
+                selected_action = None
+            if selected_action:
+                action_names.append(selected_action["name"])
+        try:
+            connections = connections_bank.list_connections_by_ids(connection_ids)
+        except RuntimeError:
+            connections = []
+        relevant_connections = platform_client.select_relevant_connections(
+            connections, message_text, action_names
+        )
+        for connection in relevant_connections:
+            try:
+                resolved = connections_bank.get_connection_secret(connection["id"])
+            except RuntimeError:
+                resolved = None
+            if not resolved:
+                continue
+            public_connection, secret = resolved
+            data, error = platform_client.fetch_platform_data(public_connection, secret)
+            # Une plateforme secondaire indisponible ne fait jamais echouer
+            # toute la demande (prompt §45) : on le signale simplement dans
+            # le contexte transmis, l'IA (ou l'humain qui lit metadata) voit
+            # que cette source n'a pas pu etre utilisee.
+            platform_data.append(
+                {
+                    "connectionId": public_connection["id"],
+                    "name": public_connection["name"],
+                    "platformType": public_connection["platformType"],
+                    "used": error is None,
+                    "data": data,
+                    "error": error,
+                }
+            )
+
     payload = {
         # Contrat minimal cote n8n : prompt/provider/conversationId/userId.
         "prompt": message_text,
@@ -123,6 +170,10 @@ def execute_workflow_run(
         "files": file_links,
         "sourceResultIds": source_result_ids,
         "action": {"id": action_id, "type": action_id, "parameters": action_parameters} if action_id else None,
+        # Uniquement les connexions selectionnees ET jugees pertinentes ;
+        # une connexion selectionnee mais non pertinente n'apparait meme
+        # pas ici (jamais appelee, prompt §21/43).
+        "platformData": platform_data,
     }
 
     try:

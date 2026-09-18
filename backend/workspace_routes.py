@@ -29,7 +29,7 @@ import uuid
 import requests
 from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
 
-from librairies import database, n8n_client, realtime, workflow_bank, workspace
+from librairies import connections_bank, database, n8n_client, realtime, workflow_bank, workspace
 from librairies.jobs import execute_workflow_run, queue
 from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
@@ -604,6 +604,109 @@ def remove_entry_action_route(entry_action_id):
 
 
 # ---------------------------------------------------------------------------
+# Banque de connexions plateformes/API : bouton "Plateformes/API" de
+# l'entry (a gauche du trombone). Meme principe de banque centrale et
+# partagee que la banque de boutons ci-dessus (voir la note d'architecture
+# dans librairies/connections_bank.py). La clef API en clair n'est JAMAIS
+# renvoyee par aucune de ces routes (voir _public_connection).
+# ---------------------------------------------------------------------------
+
+MAX_CONNECTIONS_PER_MESSAGE = 10
+
+ALLOWED_PLATFORM_TYPES_MAX_LENGTH = 60
+
+
+@workspace_bp.route("/connections", methods=["GET"])
+def list_connections_route():
+    _user, err = _require_user()
+    if err:
+        return err
+    search = str(request.args.get("search", ""))[:200]
+    try:
+        connections = connections_bank.list_connections(search=search)
+    except RuntimeError:
+        return _error(503, "Banque de connexions non configuree.")
+    return jsonify(ok=True, connections=connections)
+
+
+@workspace_bp.route("/connections", methods=["POST"])
+@limiter.limit("20 per minute")
+def create_connection_route():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()[:100]
+    platform_type = str(data.get("platformType", "")).strip()[:ALLOWED_PLATFORM_TYPES_MAX_LENGTH]
+    api_key = str(data.get("apiKey", "")).strip()
+    keywords = data.get("keywords") or []
+    base_url = str(data.get("baseUrl", "")).strip()
+
+    if not name:
+        return _error(400, "Nom de la connexion requis.")
+    if not platform_type:
+        return _error(400, "Plateforme/type requis.")
+    if not api_key:
+        return _error(400, "Clef API requise.")
+    if not isinstance(keywords, list):
+        return _error(400, "Mots-cles invalides.")
+
+    try:
+        connection = connections_bank.create_connection(
+            name=name,
+            platform_type=platform_type,
+            api_key=api_key,
+            created_by=user["id"],
+            keywords=keywords,
+            config={"baseUrl": base_url} if base_url else None,
+        )
+    except RuntimeError:
+        return _error(503, "Banque de connexions non configuree.")
+    return jsonify(ok=True, connection=connection)
+
+
+@workspace_bp.route("/connections/<connection_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+def rename_connection_route(connection_id):
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()[:100]
+    if not name:
+        return _error(400, "Nom requis.")
+    try:
+        connection = connections_bank.rename_connection(
+            connection_id, name, actor_user_id=user["id"], is_admin=user.get("role") == "admin"
+        )
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except RuntimeError:
+        return _error(503, "Banque de connexions non configuree.")
+    if not connection:
+        return _error(404, "Connexion introuvable.")
+    return jsonify(ok=True, connection=connection)
+
+
+@workspace_bp.route("/connections/<connection_id>", methods=["DELETE"])
+def delete_connection_route(connection_id):
+    user, err = _require_user()
+    if err:
+        return err
+    try:
+        deleted = connections_bank.delete_connection(
+            connection_id, actor_user_id=user["id"], is_admin=user.get("role") == "admin"
+        )
+    except PermissionError as exc:
+        return _error(403, str(exc))
+    except RuntimeError:
+        return _error(503, "Banque de connexions non configuree.")
+    if not deleted:
+        return _error(404, "Connexion introuvable.")
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Resultats reutilisables
 # ---------------------------------------------------------------------------
 
@@ -729,6 +832,7 @@ def send_message_route():
     message_text = str(data.get("message", ""))[:8000].strip()
     file_ids = data.get("fileIds") or []
     source_result_ids = data.get("sourceResultIds") or []
+    connection_ids = data.get("connectionIds") or []
     action = data.get("action") or None
     request_id = str(data.get("requestId") or "")[:100] or str(uuid.uuid4())
 
@@ -740,6 +844,8 @@ def send_message_route():
         return _error(400, "Nombre de fichiers invalide.")
     if not isinstance(source_result_ids, list):
         return _error(400, "sourceResultIds invalide.")
+    if not isinstance(connection_ids, list) or len(connection_ids) > MAX_CONNECTIONS_PER_MESSAGE:
+        return _error(400, "Nombre de connexions invalide.")
 
     action_id = None
     action_parameters = {}
@@ -760,6 +866,13 @@ def send_message_route():
     for result_id in source_result_ids:
         if not workspace.get_result(result_id):
             return _error(404, "Resultat source introuvable.")
+    for connection_id in connection_ids:
+        # Banque partagee (comme les boutons) : n'importe quel utilisateur
+        # authentifie peut utiliser une connexion existante, mais un
+        # connectionId invente/obsolete cote client est toujours rejete ici
+        # (jamais fait confiance a une configuration venue du frontend, §36/44).
+        if not connections_bank.get_connection(connection_id):
+            return _error(404, "Connexion introuvable.")
 
     # Idempotence : un meme requestId rejoue (retry reseau, double-clic) ne
     # redeclenche jamais un second workflow ni un second message utilisateur.
@@ -841,6 +954,7 @@ def send_message_route():
         message_text,
         file_ids,
         source_result_ids,
+        connection_ids,
         request_id,
         job_timeout=N8N_TIMEOUT_SECONDS + 30,
     )

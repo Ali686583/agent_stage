@@ -592,7 +592,9 @@ html, body {
 .composer-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .composer-actions-left { position: relative; display: flex; align-items: center; }
 .composer-actions-right { display: flex; gap: 8px; align-items: center; }
+.icon-btn-wrap { position: relative; display: flex; align-items: center; }
 .icon-btn {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -606,6 +608,24 @@ html, body {
 }
 .icon-btn:hover { background: var(--color-accent-soft-bg); }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Badge de comptage (connexions plateformes/API selectionnees) : discret,
+   visible uniquement si state.selectedConnectionIds n'est pas vide (voir
+   updateConnectionsBadge() dans workspace.js). */
+.icon-btn-badge {
+  position: absolute;
+  top: -4px;
+  inset-inline-end: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--text-on-brand-green);
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 15px;
+  text-align: center;
+}
 
 /* Bouton d'envoi : petit carre aux angles arrondis, c'est le FOND qui
    indique le modele selectionne (pas seulement la fleche). */
@@ -678,7 +698,14 @@ html, body {
   border-radius: var(--radius-small);
   font-size: 0.8rem;
   line-height: 1;
+  /* Visible uniquement au survol du bouton (comme les "..." des
+     conversations et des resultats de "Choisir un bouton"), a droite du
+     libelle du bouton : jusqu'ici toujours visible, incoherent avec le
+     reste de l'interface. */
+  opacity: 0;
 }
+.action-widget-wrap:hover .action-widget-menu-btn,
+.action-widget-menu-btn:focus-visible { opacity: 1; }
 .action-widget-menu-btn:hover { background: var(--color-border); }
 .action-bank-results { max-height: 220px; overflow-y: auto; }
 .action-bank-result-row { position: relative; display: flex; align-items: center; }
@@ -695,6 +722,54 @@ html, body {
 }
 .action-bank-result-row:hover .action-bank-result-menu-btn { opacity: 1; }
 .action-bank-result-menu-btn:hover { background: var(--color-border); }
+
+/* Menu "Plateformes / API" : liste de connexions a cocher + formulaire
+   d'ajout, reutilise item-context-menu comme tous les autres menus de
+   l'entry (align-start + open-up pour les memes raisons que le bouton "+"
+   d'ajout de bouton, voir plus haut). */
+.connections-list { max-height: 240px; overflow-y: auto; display: flex; flex-direction: column; }
+.connection-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-small);
+}
+.connection-row:hover { background: var(--color-accent-soft-bg); }
+.connection-row input[type="checkbox"] { flex-shrink: 0; }
+.connection-row-label {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  text-align: start;
+}
+.connection-row-name { font-size: 0.84rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connection-row-type { font-size: 0.72rem; color: var(--color-muted); }
+.connection-row-menu-btn {
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: var(--radius-small);
+  opacity: 0;
+  flex-shrink: 0;
+}
+.connection-row:hover .connection-row-menu-btn { opacity: 1; }
+.connection-row-menu-btn:hover { background: var(--color-border); }
+.connections-advanced-toggle {
+  border: 0;
+  background: none;
+  color: var(--color-accent-text);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
+  padding: 4px 2px;
+  text-align: start;
+}
 
 /* Menu flottant (position: fixed) : place au clic via getBoundingClientRect,
    pour ne jamais etre coupe par overflow-y:auto de .action-bank-results. */

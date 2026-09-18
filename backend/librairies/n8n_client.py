@@ -153,3 +153,18 @@ def create_action_workflow(name: str) -> dict:
         "editorUrl": f"{N8N_API_URL}/workflow/{workflow_id}",
         "active": bool(data.get("active")),
     }
+
+
+def delete_workflow(n8n_workflow_id: str) -> bool:
+    """Supprime definitivement un workflow n8n. Best-effort : appele
+    uniquement lors d'un nettoyage explicite d'un bouton de la banque
+    (voir workflow_bank.purge_actions_named) ; l'appelant doit decider quoi
+    faire d'un echec (ne jamais bloquer la suppression cote base pour ca)."""
+    _require_config()
+    response = requests.delete(
+        f"{N8N_API_URL}/api/v1/workflows/{n8n_workflow_id}",
+        headers={"X-N8N-API-KEY": N8N_API_KEY},
+        timeout=20,
+    )
+    response.raise_for_status()
+    return True

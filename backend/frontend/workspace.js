@@ -24,6 +24,13 @@
     // Banque de boutons/actions (Phase 5) : chargee depuis le backend
     // (Postgres-jg_R via /api/workspace/entry-actions), jamais codee en dur.
     entryActions: [],
+    // Banque de connexions plateformes/API (bouton a gauche du trombone) :
+    // chargee depuis /api/workspace/connections. La selection (quelles
+    // connexions sont cochees) est un etat de la session en cours, pas
+    // reinitialise a chaque envoi (contrairement aux pieces jointes) :
+    // cocher "API Finance" une fois reste coche pour les messages suivants.
+    connections: [],
+    selectedConnectionIds: new Set(),
     projects: [],
     discussionsCursor: null,
     sending: false,
@@ -164,6 +171,8 @@
     dom.modelButtons = Array.from(document.querySelectorAll(".model-selector button"));
     dom.actionWidgets = document.getElementById("ws-action-widgets");
     dom.addActionBtn = document.getElementById("ws-add-action-btn");
+    dom.connectionsBtn = document.getElementById("ws-connections-btn");
+    dom.connectionsBadge = document.getElementById("ws-connections-badge");
     dom.profileTrigger = document.getElementById("ws-profile-trigger");
     dom.profileMenu = document.getElementById("ws-profile-menu");
     dom.profileName = document.getElementById("ws-profile-name");
@@ -1571,6 +1580,246 @@
     });
   }
 
+  // ---------------------------------------------------------------------
+  // Plateformes/API (banque de connexions) : bouton place immediatement a
+  // gauche du trombone. Meme principe de banque centrale et partagee que
+  // la banque de boutons ci-dessus (voir librairies/connections_bank.py) :
+  // les connexions sont chargees depuis le backend, jamais codees en dur.
+  // La clef API n'est jamais recue ici : /connections ne renvoie que des
+  // metadonnees (id, nom, type, mots-cles, connected:true).
+  // ---------------------------------------------------------------------
+
+  function updateConnectionsBadge() {
+    const count = state.selectedConnectionIds.size;
+    dom.connectionsBadge.textContent = String(count);
+    dom.connectionsBadge.classList.toggle("hidden", count === 0);
+  }
+
+  function openConnectionsMenu() {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open open-up" });
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.connections_menu_title") }));
+    const listBox = el("div", { class: "connections-list" });
+    menu.appendChild(listBox);
+    menu.appendChild(el("div", { class: "menu-divider" }));
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.add_connection"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showAddConnectionForm(menu);
+        },
+      })
+    );
+    dom.connectionsBtn.parentElement.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+    renderConnectionsList(listBox);
+  }
+
+  async function renderConnectionsList(listBox) {
+    const { ok, data } = await api("/connections");
+    listBox.innerHTML = "";
+    if (!ok || !data.ok) return;
+    state.connections = data.connections;
+    // Une connexion supprimee ailleurs (autre onglet/utilisateur) ne doit
+    // jamais rester cochee ici : re-synchronise la selection sur ce qui
+    // existe reellement dans la banque.
+    const validIds = new Set(state.connections.map((c) => c.id));
+    Array.from(state.selectedConnectionIds).forEach((id) => {
+      if (!validIds.has(id)) state.selectedConnectionIds.delete(id);
+    });
+    updateConnectionsBadge();
+
+    if (!state.connections.length) {
+      listBox.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_connections") }));
+      return;
+    }
+    state.connections.forEach((connection) => {
+      const checkboxId = `ws-conn-${connection.id}`;
+      const checkbox = el("input", { type: "checkbox", id: checkboxId });
+      checkbox.checked = state.selectedConnectionIds.has(connection.id);
+      checkbox.addEventListener("click", (event) => event.stopPropagation());
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) state.selectedConnectionIds.add(connection.id);
+        else state.selectedConnectionIds.delete(connection.id);
+        updateConnectionsBadge();
+      });
+      const label = el("label", { class: "connection-row-label", for: checkboxId }, [
+        el("span", { class: "connection-row-name", text: connection.name }),
+        el("span", { class: "connection-row-type", text: connection.platformType }),
+      ]);
+      label.addEventListener("click", (event) => event.stopPropagation());
+      const menuBtn = el("button", {
+        type: "button",
+        class: "connection-row-menu-btn",
+        "aria-label": t("workspace.action_menu"),
+        text: "⋯",
+        onclick: (event) => {
+          event.stopPropagation();
+          openConnectionRowMenu(connection, menuBtn, () => renderConnectionsList(listBox));
+        },
+      });
+      listBox.appendChild(el("div", { class: "connection-row" }, [checkbox, label, menuBtn]));
+    });
+  }
+
+  function openConnectionRowMenu(connection, anchorBtn, onChanged) {
+    closeFixedMenu();
+    const rect = anchorBtn.getBoundingClientRect();
+    const menu = el("div", { class: "action-bank-fixed-menu" });
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${Math.max(8, rect.right - 200)}px`;
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        text: t("workspace.rename"),
+        onclick: (event) => {
+          event.stopPropagation();
+          showRenameConnectionForm(connection, menu, onChanged);
+        },
+      })
+    );
+    menu.appendChild(
+      el("button", {
+        type: "button",
+        class: "danger-text",
+        text: t("workspace.delete_connection"),
+        onclick: (event) => {
+          event.stopPropagation();
+          closeFixedMenu();
+          showConfirmModal(t("workspace.confirm_delete_connection").replace("{name}", connection.name), async () => {
+            const { ok, data } = await api(`/connections/${connection.id}`, { method: "DELETE" });
+            if (!ok || !data.ok) {
+              showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+              return;
+            }
+            state.selectedConnectionIds.delete(connection.id);
+            if (onChanged) onChanged();
+          });
+        },
+      })
+    );
+    document.body.appendChild(menu);
+    activeFixedMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeFixedMenu, { once: true }), 0);
+  }
+
+  function showRenameConnectionForm(connection, menu, onChanged) {
+    menu.innerHTML = "";
+    menu.onclick = (event) => event.stopPropagation();
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename") }));
+    const input = el("input", { type: "text" });
+    input.value = connection.name;
+    const form = el("div", { class: "project-create-form" }, [
+      input,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: () => closeFixedMenu() }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.save"),
+          onclick: async () => {
+            const name = input.value.trim();
+            if (!name) return;
+            await api(`/connections/${connection.id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+            closeFixedMenu();
+            if (onChanged) onChanged();
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    input.focus();
+    input.select();
+  }
+
+  function showAddConnectionForm(menu) {
+    menu.onclick = (event) => event.stopPropagation();
+    menu.innerHTML = "";
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_connection") }));
+
+    const nameInput = el("input", { type: "text", placeholder: t("workspace.connection_name_placeholder") });
+    const typeInput = el("input", { type: "text", placeholder: t("workspace.connection_type_placeholder") });
+    const keyInput = el("input", { type: "password", placeholder: t("workspace.connection_api_key_placeholder") });
+    const keywordsInput = el("input", { type: "text", placeholder: t("workspace.connection_keywords_placeholder") });
+    const baseUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_base_url_placeholder") });
+
+    const advancedWrap = el("div", { class: "project-create-form hidden" }, [baseUrlInput]);
+    const advancedToggle = el("button", {
+      type: "button",
+      class: "connections-advanced-toggle",
+      text: t("workspace.advanced_settings"),
+      onclick: (event) => {
+        event.stopPropagation();
+        advancedWrap.classList.toggle("hidden");
+      },
+    });
+
+    const form = el("div", { class: "project-create-form" }, [
+      nameInput,
+      typeInput,
+      keyInput,
+      keywordsInput,
+      advancedToggle,
+      advancedWrap,
+      el("div", { class: "project-create-actions" }, [
+        el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
+        el("button", {
+          type: "button",
+          class: "primary",
+          text: t("workspace.create"),
+          onclick: async (event) => {
+            event.stopPropagation();
+            const name = nameInput.value.trim();
+            const platformType = typeInput.value.trim();
+            const apiKey = keyInput.value.trim();
+            if (!name || !platformType || !apiKey) {
+              showComposerError(t("workspace.error_generic"));
+              return;
+            }
+            const keywords = keywordsInput.value
+              .split(",")
+              .map((k) => k.trim())
+              .filter(Boolean);
+            const saveBtn = event.currentTarget;
+            saveBtn.disabled = true;
+            saveBtn.textContent = t("workspace.creating");
+            const created = await api("/connections", {
+              method: "POST",
+              body: JSON.stringify({
+                name,
+                platformType,
+                apiKey,
+                keywords,
+                baseUrl: baseUrlInput.value.trim(),
+              }),
+            });
+            if (!created.ok || !created.data.ok) {
+              saveBtn.disabled = false;
+              saveBtn.textContent = t("workspace.create");
+              showComposerError(created.data && created.data.error ? created.data.error : t("workspace.error_generic"));
+              return;
+            }
+            state.selectedConnectionIds.add(created.data.connection.id);
+            closeContextMenu();
+            openConnectionsMenu();
+          },
+        }),
+      ]),
+    ]);
+    menu.appendChild(form);
+    nameInput.focus();
+  }
+
+  function wireConnectionsButton() {
+    dom.connectionsBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openConnectionsMenu();
+    });
+  }
+
   function renderFileChips() {
     dom.fileChips.innerHTML = "";
     state.attachments.forEach((attachment) => {
@@ -1693,6 +1942,12 @@
     // ChatGPT/Claude selectionne par ailleurs.
     if (selectedEntryAction) {
       payload.action = { id: selectedEntryAction.actionId, type: selectedEntryAction.actionId, parameters: {} };
+    }
+    // Plateformes/API : seuls les identifiants sont transmis (jamais une
+    // configuration ou une clef) ; le backend resout, filtre par pertinence
+    // et appelle lui-meme les connexions retenues (voir jobs.py).
+    if (state.selectedConnectionIds.size) {
+      payload.connectionIds = Array.from(state.selectedConnectionIds);
     }
 
     const composerSnapshot = {
@@ -1824,6 +2079,8 @@
     wireFileUpload();
     wireComposer();
     wireAddActionButton();
+    wireConnectionsButton();
+    updateConnectionsBadge();
 
     dom.newProjectBtn.addEventListener("click", () => dom.projectForm.classList.toggle("hidden"));
     dom.projectCancelBtn.addEventListener("click", () => {

@@ -353,3 +353,39 @@ def reorder_entry_actions(context_id: str, ordered_entry_action_ids: list) -> No
                 "UPDATE entry_actions SET position = %s WHERE id = %s AND context_id = %s;",
                 (index, entry_action_id, context_id),
             )
+
+
+# ---------------------------------------------------------------------------
+# Nettoyage ponctuel demande explicitement (bouton de demonstration
+# "Analyser pdf" cree pendant la preuve a 2 comptes de cette session, plus
+# besoin desormais). Supprime FORCE les entry_actions qui le referencent
+# (contrairement a delete_action, qui refuse normalement si encore utilise
+# ailleurs : ici la suppression EST le but explicite), puis l'action et son
+# workflow_record. Renvoie la liste des n8n_workflow_id a nettoyer cote n8n
+# (voir server.py, qui appelle n8n_client.delete_workflow dessus) : ce
+# module ne connait jamais N8N_API_URL/N8N_API_KEY lui-meme.
+# ---------------------------------------------------------------------------
+
+def purge_actions_named(names: list[str]) -> list[str]:
+    if not names:
+        return []
+    with _db() as conn:
+        actions = conn.execute(
+            "SELECT id, workflow_record_id FROM actions WHERE name = ANY(%s);",
+            (names,),
+        ).fetchall()
+        if not actions:
+            return []
+        action_ids = [a["id"] for a in actions]
+        workflow_record_ids = [a["workflow_record_id"] for a in actions if a["workflow_record_id"]]
+        conn.execute("DELETE FROM entry_actions WHERE action_id = ANY(%s);", (action_ids,))
+        conn.execute("DELETE FROM actions WHERE id = ANY(%s);", (action_ids,))
+        n8n_workflow_ids = []
+        if workflow_record_ids:
+            records = conn.execute(
+                "SELECT n8n_workflow_id FROM workflow_records WHERE id = ANY(%s);",
+                (workflow_record_ids,),
+            ).fetchall()
+            n8n_workflow_ids = [r["n8n_workflow_id"] for r in records if r["n8n_workflow_id"]]
+            conn.execute("DELETE FROM workflow_records WHERE id = ANY(%s);", (workflow_record_ids,))
+        return n8n_workflow_ids
