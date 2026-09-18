@@ -57,8 +57,24 @@ def _db():
 
 
 def init_db() -> None:
-    """Cree les tables si elles n'existent pas encore. A appeler au demarrage."""
+    """
+    Cree les tables si elles n'existent pas encore. A appeler au demarrage.
+
+    Verrou consultatif Postgres : avec plusieurs workers gunicorn qui
+    importent ce module en meme temps, des CREATE TABLE/INDEX IF NOT EXISTS
+    concurrents sur des objets pas encore crees peuvent tous les deux passer
+    le test d'existence avant qu'aucun ne committe, et Postgres leve alors
+    une UniqueViolation sur son catalogue interne au lieu d'ignorer
+    silencieusement le doublon (deja observe en production sur la banque de
+    boutons, meme cause). Ce verrou serialise toute la migration.
+    """
     with _db() as conn:
+        conn.execute("SELECT pg_advisory_lock(727001727002);")
+        _create_core_tables(conn)
+        conn.execute("SELECT pg_advisory_unlock(727001727002);")
+
+
+def _create_core_tables(conn) -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
