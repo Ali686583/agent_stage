@@ -124,6 +124,11 @@ html, body {
 .sidebar-section-header:hover { background: var(--color-accent-soft-bg); }
 .section-chevron { display: inline-flex; transition: transform 0.15s ease; }
 .sidebar-section.open .section-chevron { transform: rotate(90deg); }
+/* Repliable : seul l'en-tete reste visible tant que la section n'est pas
+   "open" (jusqu'ici la classe "open" ne faisait que pivoter la fleche,
+   sans jamais reellement masquer le contenu - aucune section ne se
+   repliait vraiment). */
+.sidebar-section:not(.open) > *:not(.sidebar-section-header) { display: none; }
 
 .sidebar-new-btn {
   display: flex;
