@@ -271,6 +271,12 @@ html, body {
    hors de l'ecran, meme probleme que le bug de menu de renommage deja
    corrige (position: relative manquante), mais cote alignement ici. */
 .item-context-menu.align-start { inset-inline-start: 4px; inset-inline-end: auto; }
+/* Ouverture vers le HAUT : necessaire pour les menus ancres pres du bas de
+   l'ecran (bouton + de l'entry, "..." des boutons d'action) - l'entry est
+   structurellement en bas de la zone de conversation, donc un menu ouvert
+   vers le bas (top: 100%, comportement par defaut) part hors ecran et
+   devient inaccessible (ex : "Choisir un bouton" jamais atteignable). */
+.item-context-menu.open-up { top: auto; bottom: 100%; margin-bottom: 4px; }
 .item-context-menu button {
   display: block;
   width: 100%;

@@ -1361,7 +1361,7 @@
 
   function openActionWidgetMenu(entryAction, anchorBtn) {
     closeContextMenu();
-    const menu = el("div", { class: "item-context-menu open align-start" });
+    const menu = el("div", { class: "item-context-menu open align-start open-up" });
     if (entryAction.editorUrl) {
       // Ouvre directement l'editeur du workflow n8n de cette action, sans
       // avoir a le rechercher manuellement (spec Phase 5 : accès direct au
@@ -1446,7 +1446,7 @@
 
   function openAddActionMenu() {
     closeContextMenu();
-    const menu = el("div", { class: "item-context-menu open align-start" });
+    const menu = el("div", { class: "item-context-menu open align-start open-up" });
     menu.appendChild(
       el("button", {
         type: "button",
