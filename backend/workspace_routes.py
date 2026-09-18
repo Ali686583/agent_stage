@@ -615,6 +615,25 @@ def delete_action_bank_route(action_id):
     deleted = workflow_bank.delete_action(action_id)
     if not deleted:
         return _error(409, "Cette action est encore utilisee ailleurs : impossible de la supprimer definitivement.")
+
+    # Nettoyage best-effort du workflow n8n associe : sans ca, l'action
+    # disparaissait de la banque mais son workflow n8n restait actif et
+    # joignable indefiniment, et sa ligne workflow_records restait orpheline
+    # dans Postgres-jg_R (trouve lors de la validation E2E de la suppression
+    # d'un bouton). Ne doit jamais faire echouer la suppression deja actee
+    # du bouton cote base si n8n est indisponible.
+    workflow_record_id = action.get("workflowRecordId")
+    if workflow_record_id:
+        n8n_workflow_id = None
+        try:
+            n8n_workflow_id = workflow_bank.delete_workflow_record(workflow_record_id)
+        except RuntimeError:
+            pass
+        if n8n_workflow_id:
+            try:
+                n8n_client.delete_workflow(n8n_workflow_id)
+            except (N8nConfigError, requests.exceptions.RequestException):
+                pass
     return jsonify(ok=True)
 
 
@@ -788,11 +807,21 @@ def delete_connection_route(connection_id):
 
 @workspace_bp.route("/results/<result_id>", methods=["GET"])
 def get_result_route(result_id):
-    _user, err = _require_user()
+    user, err = _require_user()
     if err:
         return err
     result = workspace.get_result(result_id)
     if not result:
+        return _error(404, "Resultat introuvable.")
+    # Trouve pendant la validation E2E : cette route ne verifiait jusqu'ici
+    # que l'authentification, jamais l'appartenance a la conversation -- un
+    # utilisateur authentifie quelconque pouvait lire le resultat COMPLET
+    # (prompt, donnees plateformes/API recuperees, etc.) de N'IMPORTE QUELLE
+    # conversation d'un autre utilisateur en devinant/observant son
+    # result_id. Meme traitement (404, pas 403) que get_conversation_route :
+    # ne pas reveler qu'une conversation/un resultat existe a quelqu'un qui
+    # n'y a pas acces.
+    if not workspace.is_participant(result["conversationId"], user["id"]):
         return _error(404, "Resultat introuvable.")
     return jsonify(ok=True, result=result)
 
@@ -940,7 +969,12 @@ def send_message_route():
         if not workspace.user_can_access_file(file_id, user["id"]):
             return _error(403, "Acces refuse a un fichier.")
     for result_id in source_result_ids:
-        if not workspace.get_result(result_id):
+        source_result = workspace.get_result(result_id)
+        # Meme faille corrigee sur get_result_route ci-dessus, appliquee ici :
+        # une simple existence ne suffit pas, sinon n'importe quel
+        # utilisateur pourrait enchainer le resultat prive d'une conversation
+        # d'un autre utilisateur comme "source" de son propre message.
+        if not source_result or not workspace.is_participant(source_result["conversationId"], user["id"]):
             return _error(404, "Resultat source introuvable.")
     for connection_id in connection_ids:
         # Banque partagee (comme les boutons) : n'importe quel utilisateur

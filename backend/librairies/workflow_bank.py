@@ -223,6 +223,25 @@ def get_workflow_record_by_action(action_id: str) -> dict | None:
         return _public_workflow_record(row) if row else None
 
 
+def delete_workflow_record(workflow_record_id: str) -> str | None:
+    """Supprime la reference locale a un workflow n8n (utilise par
+    delete_action_bank_route juste apres delete_action, pour ne pas laisser
+    une ligne orpheline dans Postgres-jg_R en plus du workflow n8n lui-meme
+    -- trouve pendant la validation E2E de la suppression d'un bouton :
+    delete_action() ne touchait jusqu'ici que la table actions, jamais
+    workflow_records ni le workflow n8n reel, qui restaient actifs et
+    joignables indefiniment). Renvoie le n8n_workflow_id a nettoyer cote n8n
+    (voir workspace_routes.py, qui appelle n8n_client.delete_workflow dessus
+    -- ce module ne connait jamais N8N_API_URL/N8N_API_KEY lui-meme), ou None
+    si la ligne n'existait pas ou n'avait pas de workflow n8n associe."""
+    with _db() as conn:
+        row = conn.execute(
+            "DELETE FROM workflow_records WHERE id = %s RETURNING n8n_workflow_id;",
+            (workflow_record_id,),
+        ).fetchone()
+        return row["n8n_workflow_id"] if row else None
+
+
 # ---------------------------------------------------------------------------
 # Actions (banque centrale)
 # ---------------------------------------------------------------------------
