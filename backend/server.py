@@ -71,7 +71,7 @@ connections_bank.init_connections_db()
 # Idempotent (no-op des la 2e execution) : sans danger a laisser demarrer
 # a chaque boot, mais peut etre retire une fois la suppression confirmee.
 try:
-    _leftover_n8n_ids = workflow_bank.purge_actions_named(["Analyser pdf"])
+    _leftover_n8n_ids = workflow_bank.purge_actions_named(["Analyser pdf", "Analyser"])
     for _n8n_id in _leftover_n8n_ids:
         try:
             n8n_client.delete_workflow(_n8n_id)
