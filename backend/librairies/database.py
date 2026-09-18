@@ -150,35 +150,15 @@ def _create_core_tables(conn) -> None:
             );
             """
         )
-        # Migration additive : conversation "commune" partagee entre tous les
-        # utilisateurs (session commune demandee explicitement), distincte
-        # d'une conversation privee avec invitation explicite (Phase 1).
+        # Migration additive : conversations "communes" partagees entre tous
+        # les utilisateurs (session commune demandee explicitement),
+        # distinctes d'une conversation privee avec invitation explicite
+        # (Phase 1). Plusieurs discussions communes peuvent desormais
+        # coexister (chacune creee explicitement via "+ Nouvelle discussion
+        # commune"), donc plus de contrainte "une seule" ici : l'ancien index
+        # unique partiel qui l'imposait est retire s'il existe encore.
         conn.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT false;")
-        # Reparation ponctuelle : une race condition (deux acces concurrents
-        # au tout premier appel de "Discussion commune", cf. get_or_create_
-        # shared_conversation) a pu creer plus d'une conversation marquee
-        # is_shared=true avant la mise en place du verrou ci-dessous. On ne
-        # garde que la plus ancienne comme conversation commune canonique ;
-        # les autres redeviennent de simples conversations privees (leurs
-        # messages et participants restent intacts, juste plus "communes").
-        conn.execute(
-            """
-            UPDATE conversations SET is_shared = false
-            WHERE is_shared = true
-            AND id NOT IN (
-                SELECT id FROM conversations WHERE is_shared = true
-                ORDER BY created_at ASC LIMIT 1
-            );
-            """
-        )
-        # Verrou structurel : au plus UNE conversation is_shared=true peut
-        # exister desormais (index unique partiel). Toute course future entre
-        # deux requetes concurrentes echoue proprement au lieu de dupliquer
-        # (voir ON CONFLICT dans get_or_create_shared_conversation).
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_one_shared "
-            "ON conversations (is_shared) WHERE is_shared = true;"
-        )
+        conn.execute("DROP INDEX IF EXISTS idx_conversations_one_shared;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_participants (

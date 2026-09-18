@@ -183,17 +183,26 @@ def list_conversations_route():
 
 
 @workspace_bp.route("/conversations/shared", methods=["GET"])
-def get_shared_conversation_route():
-    """Conversation "commune" : une seule conversation partagee par TOUS les
-    utilisateurs authentifies (session commune), cree au premier acces si
-    elle n'existe pas encore. Route statique enregistree AVANT la route
-    dynamique /conversations/<conversation_id> pour ne jamais etre
-    interceptee par elle."""
+def list_shared_conversations_route():
+    """Discussions "communes" : visibles et ouvrables par TOUS les
+    utilisateurs authentifies, sans invitation. Route statique enregistree
+    AVANT la route dynamique /conversations/<conversation_id> pour ne
+    jamais etre interceptee par elle."""
     user, err = _require_user()
     if err:
         return err
-    conversation = workspace.get_or_create_shared_conversation(user["id"], user["displayName"])
-    workspace.is_participant(conversation["id"], user["id"])  # auto-rejoint si pas deja membre
+    return jsonify(ok=True, conversations=workspace.list_shared_conversations())
+
+
+@workspace_bp.route("/conversations/shared", methods=["POST"])
+@limiter.limit("10 per minute")
+def create_shared_conversation_route():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    title = str(data.get("title", "")).strip()[:200] or "Discussion commune"
+    conversation = workspace.create_shared_conversation(user["id"], user["displayName"], title)
     return jsonify(ok=True, conversation=conversation)
 
 

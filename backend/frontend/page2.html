@@ -34,19 +34,35 @@
 
           <div class="sidebar-separator"></div>
 
-          <div class="sidebar-section open">
-            <div class="sidebar-section-header" style="cursor:default;">
-              <span data-i18n="workspace.discussions">Discussions</span>
-            </div>
-            <button type="button" class="sidebar-new-btn" id="ws-new-discussion-btn" data-i18n="workspace.new_discussion">+ Nouvelle discussion</button>
-            <button type="button" class="sidebar-item sidebar-shared-conversation-btn" id="ws-shared-conversation-btn">
-              <span class="sidebar-item-main">
-                <span class="sidebar-item-text">
-                  <span class="sidebar-item-title" data-i18n="workspace.shared_conversation">Discussion commune</span>
-                </span>
+          <div class="sidebar-section open" id="ws-discussions-section">
+            <button type="button" class="sidebar-section-header" id="ws-discussions-header">
+              <span class="section-chevron">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
               </span>
+              <span data-i18n="workspace.discussions">Discussions</span>
             </button>
+            <button type="button" class="sidebar-new-btn" id="ws-new-discussion-btn" data-i18n="workspace.new_discussion">+ Nouvelle discussion</button>
             <div class="sidebar-list" id="ws-discussions-list"></div>
+          </div>
+
+          <div class="sidebar-separator"></div>
+
+          <div class="sidebar-section open" id="ws-shared-discussions-section">
+            <button type="button" class="sidebar-section-header" id="ws-shared-discussions-header">
+              <span class="section-chevron">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
+              </span>
+              <span data-i18n="workspace.shared_conversations">Discussions communes</span>
+            </button>
+            <button type="button" class="sidebar-new-btn" id="ws-new-shared-discussion-btn" data-i18n="workspace.new_shared_discussion">+ Nouvelle discussion commune</button>
+            <div class="project-create-form hidden" id="ws-shared-discussion-form">
+              <input type="text" id="ws-shared-discussion-name-input" data-i18n-placeholder="workspace.shared_discussion_name_placeholder" placeholder="Nom de la discussion commune...">
+              <div class="project-create-actions">
+                <button type="button" id="ws-shared-discussion-cancel-btn" data-i18n="workspace.cancel">Annuler</button>
+                <button type="button" class="primary" id="ws-shared-discussion-create-btn" data-i18n="workspace.create">Créer</button>
+              </div>
+            </div>
+            <div class="sidebar-list" id="ws-shared-discussions-list"></div>
           </div>
         </div>
       </aside>

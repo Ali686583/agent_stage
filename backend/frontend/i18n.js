@@ -124,6 +124,10 @@
       "workspace.open_in_n8n": "Ouvrir dans n8n",
       "workspace.delete_button_definitively": "Supprimer définitivement",
       "workspace.shared_conversation": "Discussion commune",
+      "workspace.shared_conversations": "Discussions communes",
+      "workspace.new_shared_discussion": "+ Nouvelle discussion commune",
+      "workspace.shared_discussion_name_placeholder": "Nom de la discussion commune...",
+      "workspace.no_shared_discussions": "Aucune discussion commune pour l'instant.",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -241,6 +245,10 @@
       "workspace.open_in_n8n": "Open in n8n",
       "workspace.delete_button_definitively": "Delete permanently",
       "workspace.shared_conversation": "Shared conversation",
+      "workspace.shared_conversations": "Shared discussions",
+      "workspace.new_shared_discussion": "+ New shared discussion",
+      "workspace.shared_discussion_name_placeholder": "Shared discussion name...",
+      "workspace.no_shared_discussions": "No shared discussion yet.",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -358,6 +366,10 @@
       "workspace.open_in_n8n": "فتح في n8n",
       "workspace.delete_button_definitively": "حذف نهائي",
       "workspace.shared_conversation": "محادثة مشتركة",
+      "workspace.shared_conversations": "محادثات مشتركة",
+      "workspace.new_shared_discussion": "+ محادثة مشتركة جديدة",
+      "workspace.shared_discussion_name_placeholder": "اسم المحادثة المشتركة...",
+      "workspace.no_shared_discussions": "لا توجد محادثة مشتركة بعد.",
     },
   };
 

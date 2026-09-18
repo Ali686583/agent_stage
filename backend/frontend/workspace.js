@@ -141,9 +141,18 @@
     dom.projectNameInput = document.getElementById("ws-project-name-input");
     dom.projectCancelBtn = document.getElementById("ws-project-cancel-btn");
     dom.projectCreateBtn = document.getElementById("ws-project-create-btn");
+    dom.discussionsSection = document.getElementById("ws-discussions-section");
+    dom.discussionsHeader = document.getElementById("ws-discussions-header");
     dom.discussionsList = document.getElementById("ws-discussions-list");
     dom.newDiscussionBtn = document.getElementById("ws-new-discussion-btn");
-    dom.sharedConversationBtn = document.getElementById("ws-shared-conversation-btn");
+    dom.sharedDiscussionsSection = document.getElementById("ws-shared-discussions-section");
+    dom.sharedDiscussionsHeader = document.getElementById("ws-shared-discussions-header");
+    dom.sharedDiscussionsList = document.getElementById("ws-shared-discussions-list");
+    dom.newSharedDiscussionBtn = document.getElementById("ws-new-shared-discussion-btn");
+    dom.sharedDiscussionForm = document.getElementById("ws-shared-discussion-form");
+    dom.sharedDiscussionNameInput = document.getElementById("ws-shared-discussion-name-input");
+    dom.sharedDiscussionCancelBtn = document.getElementById("ws-shared-discussion-cancel-btn");
+    dom.sharedDiscussionCreateBtn = document.getElementById("ws-shared-discussion-create-btn");
     dom.centralColumn = document.getElementById("ws-central-column");
     dom.conversationArea = document.getElementById("ws-conversation-area");
     dom.composer = document.getElementById("ws-composer");
@@ -767,15 +776,57 @@
     document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
   }
 
-  async function openSharedConversation() {
-    // "Session commune" : une seule conversation, partagee par tous les
-    // utilisateurs authentifies, creee au premier acces si necessaire
-    // (voir workspace.get_or_create_shared_conversation cote serveur).
+  // ---------------------------------------------------------------------
+  // Discussions communes (session commune) : visibles et ouvrables par
+  // tous les utilisateurs authentifies, sans invitation (voir is_participant
+  // cote serveur, qui rejoint automatiquement quiconque ouvre l'une d'elles).
+  // ---------------------------------------------------------------------
+
+  async function loadSharedConversations() {
     const { ok, data } = await api("/conversations/shared");
     if (!ok || !data.ok) return;
+    dom.sharedDiscussionsList.innerHTML = "";
+    if (!data.conversations.length) {
+      dom.sharedDiscussionsList.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_shared_discussions") }));
+      return;
+    }
+    data.conversations.forEach((conversation) => {
+      dom.sharedDiscussionsList.appendChild(renderSharedConversationItem(conversation));
+    });
+  }
+
+  function renderSharedConversationItem(conversation) {
+    const item = el("div", { class: "sidebar-item", "data-conversation-id": conversation.id });
+    if (conversation.id === state.conversationId) item.classList.add("active");
+    item.appendChild(
+      el("div", { class: "sidebar-item-main" }, [
+        avatarNode("sidebar-item-avatar", conversation.createdByAvatarUrl, conversation.createdByName),
+        el("div", { class: "sidebar-item-text" }, [
+          el("div", { class: "sidebar-item-title", text: conversation.title }),
+          el("div", { class: "sidebar-item-meta", text: `${conversation.createdByName} • ${formatDate(conversation.updatedAt)}` }),
+        ]),
+      ])
+    );
+    item.addEventListener("click", async () => {
+      await openConversation(conversation.id);
+      document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
+      item.classList.add("active");
+    });
+    return item;
+  }
+
+  async function submitNewSharedDiscussion() {
+    const title = dom.sharedDiscussionNameInput.value.trim();
+    if (!title) return;
+    const { ok, data } = await api("/conversations/shared", { method: "POST", body: JSON.stringify({ title }) });
+    if (!ok || !data.ok) return;
+    dom.sharedDiscussionNameInput.value = "";
+    dom.sharedDiscussionForm.classList.add("hidden");
+    await loadSharedConversations();
     await openConversation(data.conversation.id);
     document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
-    dom.sharedConversationBtn.classList.add("active");
+    const newItem = dom.sharedDiscussionsList.querySelector(`[data-conversation-id="${data.conversation.id}"]`);
+    if (newItem) newItem.classList.add("active");
   }
 
   async function openConversation(conversationId) {
@@ -1785,8 +1836,19 @@
     });
 
     dom.projectsHeader.addEventListener("click", () => toggleSection(dom.projectsSection));
+    dom.discussionsHeader.addEventListener("click", () => toggleSection(dom.discussionsSection));
+    dom.sharedDiscussionsHeader.addEventListener("click", () => toggleSection(dom.sharedDiscussionsSection));
     dom.newDiscussionBtn.addEventListener("click", startNewDiscussion);
-    dom.sharedConversationBtn.addEventListener("click", openSharedConversation);
+
+    dom.newSharedDiscussionBtn.addEventListener("click", () => dom.sharedDiscussionForm.classList.toggle("hidden"));
+    dom.sharedDiscussionCancelBtn.addEventListener("click", () => {
+      dom.sharedDiscussionForm.classList.add("hidden");
+      dom.sharedDiscussionNameInput.value = "";
+    });
+    dom.sharedDiscussionCreateBtn.addEventListener("click", submitNewSharedDiscussion);
+    dom.sharedDiscussionNameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submitNewSharedDiscussion();
+    });
 
     renderActionWidgets();
 
@@ -1802,7 +1864,7 @@
       if (cursor) cursor.remove();
     });
 
-    await Promise.all([loadProjects(), loadDiscussions(true), loadEntryActions()]);
+    await Promise.all([loadProjects(), loadDiscussions(true), loadEntryActions(), loadSharedConversations()]);
 
     renderInitialQuestion();
   }
