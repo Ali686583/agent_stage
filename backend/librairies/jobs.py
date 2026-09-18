@@ -109,51 +109,59 @@ def execute_workflow_run(
             }
         )
 
-    # Plateformes/API (nouveau bouton de l'entry) : une connexion
-    # selectionnee n'est appelee que si elle est aussi PERTINENTE par
-    # rapport a la demande ou au bouton selectionne (prompt §17-22) --
-    # jamais uniquement parce qu'elle est cochee. Calcule et applique
-    # cote SERVEUR uniquement : jamais confie au frontend (§44).
+    # Plateformes/API : logique GLOBALE et AUTOMATIQUE (demandee explicitement
+    # pour tous les boutons, existants et futurs, sans jamais retoucher un
+    # workflow n8n a chaque nouvelle API ajoutee). Contrairement a la version
+    # precedente, on n'exige plus que l'utilisateur coche une connexion pour
+    # qu'elle soit evaluee : TOUTES les connexions actives de la banque
+    # partagee sont candidates a chaque execution, et seule la pertinence
+    # (mots-cles vs demande + bouton) decide lesquelles sont reellement
+    # appelees. connection_ids reste supporte comme filtre optionnel : si
+    # l'utilisateur en coche explicitement, on restreint les candidates a ce
+    # sous-ensemble plutot que la banque entiere (utile pour forcer/exclure).
+    # Toujours calcule cote SERVEUR : jamais confie au frontend (§44).
     platform_data = []
-    if connection_ids:
-        action_names = []
-        if action_id:
-            try:
-                selected_action = workflow_bank.get_action(action_id)
-            except RuntimeError:
-                selected_action = None
-            if selected_action:
-                action_names.append(selected_action["name"])
+    action_names = []
+    if action_id:
         try:
-            connections = connections_bank.list_connections_by_ids(connection_ids)
+            selected_action = workflow_bank.get_action(action_id)
         except RuntimeError:
-            connections = []
-        relevant_connections = platform_client.select_relevant_connections(
-            connections, message_text, action_names
+            selected_action = None
+        if selected_action:
+            action_names.append(selected_action["name"])
+    try:
+        if connection_ids:
+            candidate_connections = connections_bank.list_connections_by_ids(connection_ids)
+        else:
+            candidate_connections = connections_bank.list_connections()
+    except RuntimeError:
+        candidate_connections = []
+    relevant_connections = platform_client.select_relevant_connections(
+        candidate_connections, message_text, action_names
+    )
+    for connection in relevant_connections:
+        try:
+            resolved = connections_bank.get_connection_secret(connection["id"])
+        except RuntimeError:
+            resolved = None
+        if not resolved:
+            continue
+        public_connection, secret = resolved
+        data, error = platform_client.fetch_platform_data(public_connection, secret)
+        # Une plateforme secondaire indisponible ne fait jamais echouer
+        # toute la demande (prompt §45) : on le signale simplement dans
+        # le contexte transmis, l'IA (ou l'humain qui lit metadata) voit
+        # que cette source n'a pas pu etre utilisee.
+        platform_data.append(
+            {
+                "connectionId": public_connection["id"],
+                "name": public_connection["name"],
+                "platformType": public_connection["platformType"],
+                "used": error is None,
+                "data": data,
+                "error": error,
+            }
         )
-        for connection in relevant_connections:
-            try:
-                resolved = connections_bank.get_connection_secret(connection["id"])
-            except RuntimeError:
-                resolved = None
-            if not resolved:
-                continue
-            public_connection, secret = resolved
-            data, error = platform_client.fetch_platform_data(public_connection, secret)
-            # Une plateforme secondaire indisponible ne fait jamais echouer
-            # toute la demande (prompt §45) : on le signale simplement dans
-            # le contexte transmis, l'IA (ou l'humain qui lit metadata) voit
-            # que cette source n'a pas pu etre utilisee.
-            platform_data.append(
-                {
-                    "connectionId": public_connection["id"],
-                    "name": public_connection["name"],
-                    "platformType": public_connection["platformType"],
-                    "used": error is None,
-                    "data": data,
-                    "error": error,
-                }
-            )
 
     payload = {
         # Contrat minimal cote n8n : prompt/provider/conversationId/userId.
