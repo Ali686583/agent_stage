@@ -720,6 +720,35 @@ html, body {
 }
 .icon-btn:hover { background: var(--color-accent-soft-bg); }
 .icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Dictee vocale : 4 etats distincts (inactif / ecoute / transcription /
+   erreur), voir wireDictation() dans workspace.js. Reste discret : pas de
+   couleur criarde permanente, seulement pendant l'ecoute/erreur. */
+#ws-dictate-btn.dictate-listening {
+  border-color: var(--color-error);
+  color: var(--color-error);
+  animation: dictate-pulse 1.4s ease-in-out infinite;
+}
+#ws-dictate-btn.dictate-processing {
+  color: var(--color-accent-text);
+  animation: dictate-processing-pulse 0.9s ease-in-out infinite;
+}
+#ws-dictate-btn.dictate-error {
+  border-color: var(--color-error);
+  color: var(--color-error);
+}
+@keyframes dictate-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.35); }
+  50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+}
+@keyframes dictate-processing-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+@media (prefers-reduced-motion: reduce) {
+  #ws-dictate-btn.dictate-listening,
+  #ws-dictate-btn.dictate-processing { animation: none; }
+}
 /* Badge de comptage (connexions plateformes/API selectionnees) : discret,
    visible uniquement si state.selectedConnectionIds n'est pas vide (voir
    updateConnectionsBadge() dans workspace.js). */
@@ -767,13 +796,33 @@ html, body {
 
 /* Widgets d'actions : de vrais boutons independants, jamais un menu
    deroulant. Structure prete pour label/icon/action.id/type/parameters
-   (voir ACTION_WIDGETS dans workspace.js). */
+   (voir ACTION_WIDGETS dans workspace.js). Affiches AU-DESSUS de l'entry
+   (voir page2.html) : le padding se place donc en dessous de la rangee,
+   contre le haut de .composer, plutot qu'au-dessus comme avant. */
 .action-widgets-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   justify-content: center;
-  padding-top: 10px;
+  padding-bottom: 10px;
+  min-height: 0;
+}
+/* Apparition/disparition en pop (scale + fondu), jamais un saut brutal de
+   la mise en page : chaque bouton anime individuellement son propre
+   .action-widget-wrap (ajout/retrait de classe cote JS, voir
+   renderActionWidgets), les autres boutons deja presents ne bougent pas. */
+.action-widget-wrap {
+  transform: scale(1);
+  opacity: 1;
+  transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.15s ease;
+}
+.action-widget-wrap.widget-entering,
+.action-widget-wrap.widget-removing {
+  transform: scale(0.82);
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .action-widget-wrap { transition: none; }
 }
 .action-widget-btn {
   display: inline-flex;
@@ -798,42 +847,67 @@ html, body {
 
 /* Bouton de la banque (Phase 5) : le "..." reutilise item-context-menu,
    qui a besoin d'un ancetre "position: relative" pour s'ancrer (meme regle
-   que .sidebar-project-name, voir le correctif du menu de renommage). */
+   que .sidebar-project-name, voir le correctif du menu de renommage).
+   Redesign : un vrai petit bouton rond independant, cliquable pour LUI SEUL
+   (jamais toute la case), toujours a droite du libelle du bouton. */
 .action-widget-wrap { position: relative; display: inline-flex; align-items: center; }
 .action-widget-menu-btn {
-  border: 0;
-  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
   color: var(--color-muted);
   cursor: pointer;
-  padding: 2px 5px;
-  margin-inline-start: 2px;
-  border-radius: var(--radius-small);
-  font-size: 0.8rem;
+  padding: 0;
+  margin-inline-start: 4px;
+  border-radius: 50%;
+  font-size: 0.66rem;
   line-height: 1;
   /* Visible uniquement au survol du bouton (comme les "..." des
      conversations et des resultats de "Choisir un bouton"), a droite du
      libelle du bouton : jusqu'ici toujours visible, incoherent avec le
      reste de l'interface. */
   opacity: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
 }
 .action-widget-wrap:hover .action-widget-menu-btn,
 .action-widget-menu-btn:focus-visible { opacity: 1; }
-.action-widget-menu-btn:hover { background: var(--color-border); }
+.action-widget-menu-btn:hover { background: var(--color-accent-soft-bg); border-color: var(--color-accent); }
 .action-bank-results { max-height: 220px; overflow-y: auto; }
 .action-bank-result-row { position: relative; display: flex; align-items: center; }
 .action-bank-result-row .action-bank-result-btn { flex: 1; min-width: 0; }
 .action-bank-result-menu-btn {
-  border: 0;
-  background: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
   color: var(--color-muted);
   cursor: pointer;
-  padding: 4px 6px;
-  border-radius: var(--radius-small);
+  padding: 0;
+  margin-inline-start: 4px;
+  border-radius: 50%;
+  font-size: 0.66rem;
+  line-height: 1;
   opacity: 0;
   flex-shrink: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
 }
 .action-bank-result-row:hover .action-bank-result-menu-btn { opacity: 1; }
-.action-bank-result-menu-btn:hover { background: var(--color-border); }
+.action-bank-result-menu-btn:hover { background: var(--color-accent-soft-bg); border-color: var(--color-accent); }
+.action-bank-creator-label {
+  padding: 4px 8px 6px;
+  font-size: 0.74rem;
+  color: var(--color-muted);
+  border-bottom: 1px solid var(--color-border);
+  margin-bottom: 4px;
+}
 
 /* Menu "Plateformes / API" : liste de connexions a cocher + formulaire
    d'ajout, reutilise item-context-menu comme tous les autres menus de

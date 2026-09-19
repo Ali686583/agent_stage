@@ -182,6 +182,12 @@ def _public_entry_action(row) -> dict:
         # Permet au frontend de proposer "Ouvrir dans n8n" directement sur ce
         # bouton, sans avoir a rechercher le workflow manuellement (spec Phase 5 §11).
         "editorUrl": row.get("editor_url"),
+        # Id brut du createur du BOUTON (pas de l'association entry_action) :
+        # cette base ne connait jamais les noms d'utilisateurs (voir
+        # l'entete du module) -- workspace_routes.py resout ce id en nom
+        # affichable via librairies/database.get_users_by_ids avant de
+        # renvoyer la reponse au frontend (UI : "Createur : ...").
+        "actionCreatedBy": row.get("action_created_by"),
     }
 
 
@@ -400,7 +406,7 @@ def list_entry_actions(context_id: str) -> list:
     with _db() as conn:
         rows = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+            SELECT ea.*, a.name AS action_name, a.status AS action_status, a.created_by AS action_created_by,
                    wr.metadata->>'editorUrl' AS editor_url
             FROM entry_actions ea
             JOIN actions a ON a.id = ea.action_id
@@ -418,7 +424,7 @@ def add_entry_action(context_id: str, action_id: str, created_by: str, alias: st
     with _db() as conn:
         existing = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+            SELECT ea.*, a.name AS action_name, a.status AS action_status, a.created_by AS action_created_by,
                    wr.metadata->>'editorUrl' AS editor_url
             FROM entry_actions ea
             JOIN actions a ON a.id = ea.action_id
@@ -445,7 +451,7 @@ def add_entry_action(context_id: str, action_id: str, created_by: str, alias: st
         )
         row = conn.execute(
             """
-            SELECT ea.*, a.name AS action_name, a.status AS action_status,
+            SELECT ea.*, a.name AS action_name, a.status AS action_status, a.created_by AS action_created_by,
                    wr.metadata->>'editorUrl' AS editor_url
             FROM entry_actions ea
             JOIN actions a ON a.id = ea.action_id

@@ -32,7 +32,11 @@
     connections: [],
     selectedConnectionIds: new Set(),
     projects: [],
+    sharedProjects: [],
     discussionsCursor: null,
+    // Dictee vocale (Web Speech API) : etat de l'instance de reconnaissance
+    // en cours, voir wireDictation(). null si non supportee par le navigateur.
+    dictation: { recognition: null, active: false, supported: false },
     sending: false,
     sidebarCollapsed: false,
     // Temps reel (Phase 3)
@@ -148,6 +152,14 @@
     dom.projectNameInput = document.getElementById("ws-project-name-input");
     dom.projectCancelBtn = document.getElementById("ws-project-cancel-btn");
     dom.projectCreateBtn = document.getElementById("ws-project-create-btn");
+    dom.sharedProjectsSection = document.getElementById("ws-shared-projects-section");
+    dom.sharedProjectsHeader = document.getElementById("ws-shared-projects-header");
+    dom.sharedProjectsList = document.getElementById("ws-shared-projects-list");
+    dom.newSharedProjectBtn = document.getElementById("ws-new-shared-project-btn");
+    dom.sharedProjectForm = document.getElementById("ws-shared-project-form");
+    dom.sharedProjectNameInput = document.getElementById("ws-shared-project-name-input");
+    dom.sharedProjectCancelBtn = document.getElementById("ws-shared-project-cancel-btn");
+    dom.sharedProjectCreateBtn = document.getElementById("ws-shared-project-create-btn");
     dom.discussionsSection = document.getElementById("ws-discussions-section");
     dom.discussionsHeader = document.getElementById("ws-discussions-header");
     dom.discussionsList = document.getElementById("ws-discussions-list");
@@ -171,6 +183,7 @@
     dom.modelButtons = Array.from(document.querySelectorAll(".model-selector button"));
     dom.actionWidgets = document.getElementById("ws-action-widgets");
     dom.addActionBtn = document.getElementById("ws-add-action-btn");
+    dom.dictateBtn = document.getElementById("ws-dictate-btn");
     dom.connectionsBtn = document.getElementById("ws-connections-btn");
     dom.connectionsBadge = document.getElementById("ws-connections-badge");
     dom.profileTrigger = document.getElementById("ws-profile-trigger");
@@ -549,7 +562,7 @@
               body: JSON.stringify({ name }),
             });
             closeContextMenu();
-            if (ok) await loadProjects();
+            if (ok) await (project.isShared ? loadSharedProjects() : loadProjects());
           },
         }),
       ]),
@@ -557,6 +570,99 @@
     menu.appendChild(form);
     input.focus();
     input.select();
+  }
+
+  // ---------------------------------------------------------------------
+  // Projets communs : meme logique que les discussions communes (visibles
+  // et modifiables par tous les utilisateurs authentifies), generalisee aux
+  // projets plutot que dupliquee (voir workspace.list_shared_projects cote
+  // serveur, qui reutilise la meme table `projects` avec is_shared=true).
+  // ---------------------------------------------------------------------
+
+  async function loadSharedProjects() {
+    const { ok, data } = await api("/projects/shared");
+    if (ok && data.ok) {
+      state.sharedProjects = data.projects;
+      renderSharedProjects();
+    }
+  }
+
+  function renderSharedProjects() {
+    dom.sharedProjectsList.innerHTML = "";
+    if (!state.sharedProjects.length) {
+      dom.sharedProjectsList.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_shared_projects") }));
+      return;
+    }
+    state.sharedProjects.forEach((project) => {
+      const group = el("div", { class: "sidebar-project-group" });
+      const header = el("div", { class: "sidebar-project-name" }, [
+        el("span", { class: "section-chevron" }, [chevronIcon()]),
+        el("span", { text: project.name, style: "flex:1;" }),
+        el("button", {
+          class: "sidebar-item-menu-btn forced-visible",
+          type: "button",
+          "aria-label": t("workspace.conversation_menu"),
+          text: "⋯",
+          onclick: (event) => {
+            event.stopPropagation();
+            openSharedProjectMenu(project, header);
+          },
+        }),
+      ]);
+      const list = el("div", { class: "sidebar-list hidden" });
+      let loaded = false;
+      header.addEventListener("click", async () => {
+        const willOpen = list.classList.contains("hidden");
+        list.classList.toggle("hidden");
+        group.classList.toggle("open", willOpen);
+        if (willOpen && !loaded) {
+          loaded = true;
+          // Meme route que pour un projet personnel : le serveur distingue
+          // deja lui-meme is_shared et renvoie la bonne liste (voir
+          // list_project_conversations_route), aucune duplication necessaire ici.
+          await loadProjectConversations(project.id, list);
+        }
+      });
+      group.appendChild(header);
+      group.appendChild(list);
+      dom.sharedProjectsList.appendChild(group);
+    });
+  }
+
+  async function submitNewSharedProject() {
+    const name = dom.sharedProjectNameInput.value.trim();
+    if (!name) return;
+    const { ok, data } = await api("/projects/shared", { method: "POST", body: JSON.stringify({ name }) });
+    if (ok && data.ok) {
+      dom.sharedProjectNameInput.value = "";
+      dom.sharedProjectForm.classList.add("hidden");
+      await loadSharedProjects();
+    }
+  }
+
+  function openSharedProjectMenu(project, anchorEl) {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    if (project.createdByUserId === state.user.id) {
+      menu.appendChild(
+        el("button", {
+          type: "button",
+          text: t("workspace.rename_project"),
+          onclick: (event) => {
+            event.stopPropagation();
+            showRenameProjectForm(project, menu);
+          },
+        })
+      );
+    } else {
+      menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_permission") }));
+    }
+    // Jamais d'option de suppression ici : un projet commun n'appartient a
+    // personne en particulier (meme regle que la conversation commune, voir
+    // workspace.delete_project qui la refuse explicitement).
+    anchorEl.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   // ---------------------------------------------------------------------
@@ -641,6 +747,7 @@
     const menu = el("div", { class: "action-bank-fixed-menu" });
     menu.style.top = `${rect.bottom + 4}px`;
     menu.style.left = `${Math.max(8, rect.right - 200)}px`;
+    menu.appendChild(el("div", { class: "action-bank-creator-label", text: creatorLabelText(action.createdByName) }));
     menu.appendChild(
       el("button", {
         type: "button",
@@ -807,21 +914,61 @@
   function renderSharedConversationItem(conversation) {
     const item = el("div", { class: "sidebar-item", "data-conversation-id": conversation.id });
     if (conversation.id === state.conversationId) item.classList.add("active");
-    item.appendChild(
-      el("div", { class: "sidebar-item-main" }, [
-        avatarNode("sidebar-item-avatar", conversation.createdByAvatarUrl, conversation.createdByName),
-        el("div", { class: "sidebar-item-text" }, [
-          el("div", { class: "sidebar-item-title", text: conversation.title }),
-          el("div", { class: "sidebar-item-meta", text: `${conversation.createdByName} • ${formatDate(conversation.updatedAt)}` }),
-        ]),
-      ])
-    );
+    const main = el("div", { class: "sidebar-item-main" }, [
+      avatarNode("sidebar-item-avatar", conversation.createdByAvatarUrl, conversation.createdByName),
+      el("div", { class: "sidebar-item-text" }, [
+        el("div", { class: "sidebar-item-title", text: conversation.title }),
+        el("div", { class: "sidebar-item-meta", text: `${conversation.createdByName} • ${formatDate(conversation.updatedAt)}` }),
+      ]),
+    ]);
+    const menuBtn = el("button", {
+      class: "sidebar-item-menu-btn",
+      type: "button",
+      "aria-label": t("workspace.conversation_menu"),
+      text: "⋯",
+      onclick: (event) => {
+        event.stopPropagation();
+        openSharedConversationMenu(conversation, menuBtn);
+      },
+    });
+    item.appendChild(main);
+    item.appendChild(menuBtn);
     item.addEventListener("click", async () => {
       await openConversation(conversation.id);
       document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
       item.classList.add("active");
     });
     return item;
+  }
+
+  function openSharedConversationMenu(conversation, anchorBtn) {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open" });
+    menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_to_project") }));
+    if (!state.sharedProjects.length) {
+      menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_shared_projects") }));
+    } else {
+      state.sharedProjects.forEach((project) => {
+        menu.appendChild(
+          el("button", {
+            type: "button",
+            text: project.name,
+            onclick: async (event) => {
+              event.stopPropagation();
+              await api(`/conversations/${conversation.id}/projects`, {
+                method: "POST",
+                body: JSON.stringify({ projectId: project.id }),
+              });
+              closeContextMenu();
+              await loadSharedProjects();
+            },
+          })
+        );
+      });
+    }
+    anchorBtn.parentElement.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
   }
 
   async function submitNewSharedDiscussion() {
@@ -1383,35 +1530,86 @@
     renderActionWidgets();
   }
 
+  // Suivi des noeuds DOM deja rendus, cle par entryAction.id : permet un
+  // diff (seuls les boutons ajoutes/retires sont animes et touchent le DOM,
+  // ceux deja presents restent en place) plutot qu'un reset complet a
+  // chaque rafraichissement de state.entryActions, qui provoquerait un saut
+  // visuel desagreable de toute la rangee (mission "boutons au-dessus de
+  // l'entry" §1 : pas de deplacement/saut brutal).
+  const actionWidgetNodes = new Map(); // entryAction.id -> { wrap, btn, menuBtn }
+
   function renderActionWidgets() {
-    dom.actionWidgets.innerHTML = "";
-    state.entryActions.forEach((entryAction, index) => {
-      const btn = el("button", {
-        type: "button",
-        class: `action-widget-btn${state.selectedWidgetIndex === index ? " active" : ""}`,
-        text: entryAction.displayName,
-        onclick: () => {
-          state.selectedWidgetIndex = state.selectedWidgetIndex === index ? null : index;
-          renderActionWidgets();
-        },
-      });
-      const menuBtn = el("button", {
-        type: "button",
-        class: "action-widget-menu-btn",
-        "aria-label": t("workspace.action_menu"),
-        text: "⋯",
-        onclick: (event) => {
-          event.stopPropagation();
-          openActionWidgetMenu(entryAction, menuBtn);
-        },
-      });
-      dom.actionWidgets.appendChild(el("div", { class: "action-widget-wrap" }, [btn, menuBtn]));
+    const reducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const currentIds = new Set(state.entryActions.map((ea) => ea.id));
+
+    // Boutons disparus (supprimes/renommes ailleurs) : animation de sortie
+    // (pop-out) puis retrait reel du DOM, jamais une disparition brutale.
+    actionWidgetNodes.forEach((node, id) => {
+      if (currentIds.has(id)) return;
+      actionWidgetNodes.delete(id);
+      if (reducedMotion) {
+        node.wrap.remove();
+        return;
+      }
+      node.wrap.classList.add("widget-removing");
+      node.wrap.addEventListener("transitionend", () => node.wrap.remove(), { once: true });
+      // Garde-fou : si transitionend ne se declenche jamais pour une raison
+      // quelconque, ne jamais laisser un bouton fantome indefiniment.
+      setTimeout(() => { if (node.wrap.parentElement) node.wrap.remove(); }, 400);
     });
+
+    state.entryActions.forEach((entryAction, index) => {
+      let node = actionWidgetNodes.get(entryAction.id);
+      const isActive = state.selectedWidgetIndex === index;
+      if (!node) {
+        const btn = el("button", { type: "button", class: "action-widget-btn" });
+        const menuBtn = el("button", {
+          type: "button",
+          class: "action-widget-menu-btn",
+          "aria-label": t("workspace.action_menu"),
+          text: "⋯",
+        });
+        const wrap = el("div", { class: "action-widget-wrap" }, [btn, menuBtn]);
+        node = { wrap, btn, menuBtn };
+        actionWidgetNodes.set(entryAction.id, node);
+        if (!reducedMotion) {
+          // Nouveau bouton : demarre reduit/transparent puis relache la
+          // classe au prochain frame pour que la transition CSS (voir
+          // .action-widget-wrap dans workspace.css) l'anime vers son etat
+          // normal (pop-in), au lieu d'apparaitre instantanement.
+          wrap.classList.add("widget-entering");
+          requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.remove("widget-entering")));
+        }
+      }
+      node.btn.textContent = entryAction.displayName;
+      node.btn.className = `action-widget-btn${isActive ? " active" : ""}`;
+      node.btn.onclick = () => {
+        state.selectedWidgetIndex = state.selectedWidgetIndex === index ? null : index;
+        renderActionWidgets();
+      };
+      node.menuBtn.onclick = (event) => {
+        event.stopPropagation();
+        openActionWidgetMenu(entryAction, node.menuBtn);
+      };
+      const referenceNode = dom.actionWidgets.children[index] || null;
+      if (referenceNode !== node.wrap) {
+        dom.actionWidgets.insertBefore(node.wrap, referenceNode);
+      }
+    });
+  }
+
+  function creatorLabelText(createdByName) {
+    return `${t("workspace.creator_label")} ${createdByName || t("workspace.creator_unknown")}`;
   }
 
   function openActionWidgetMenu(entryAction, anchorBtn) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open align-start open-up" });
+    // Provient de donnees reellement enregistrees en base (jointure
+    // resolue cote serveur, voir workspace_routes._with_entry_action_creator_names)
+    // jamais devinee/simulee cote client. Un ancien bouton dont le compte
+    // createur a ete supprime depuis affiche "inconnu" plutot qu'un nom faux.
+    menu.appendChild(el("div", { class: "action-bank-creator-label", text: creatorLabelText(entryAction.actionCreatedByName) }));
     if (entryAction.editorUrl) {
       // Ouvre directement l'editeur du workflow n8n de cette action, sans
       // avoir a le rechercher manuellement (spec Phase 5 : accès direct au
@@ -2105,6 +2303,124 @@
   }
 
   // ---------------------------------------------------------------------
+  // Dictee vocale (Web Speech API du navigateur, aucune dependance externe).
+  // LIMITE HONNETE : cette API n'est pas standardisee partout (Chrome/Edge
+  // via webkitSpeechRecognition ; Firefox desktop ne l'implemente pas a ce
+  // jour) -- si absente, le bouton reste visible mais desactive avec une
+  // infobulle claire, jamais une fausse promesse de fonctionnalite.
+  // ---------------------------------------------------------------------
+
+  const DICTATION_LANG_MAP = { fr: "fr-FR", en: "en-US", ar: "ar-SA" };
+
+  function setDictateVisualState(stateName) {
+    dom.dictateBtn.classList.remove("dictate-listening", "dictate-processing", "dictate-error");
+    if (stateName) dom.dictateBtn.classList.add(`dictate-${stateName}`);
+  }
+
+  function insertDictatedText(text) {
+    const clean = (text || "").trim();
+    if (!clean) return;
+    const textarea = dom.composerTextarea;
+    const start = textarea.selectionStart != null ? textarea.selectionStart : textarea.value.length;
+    const end = textarea.selectionEnd != null ? textarea.selectionEnd : textarea.value.length;
+    const before = textarea.value.slice(0, start);
+    const after = textarea.value.slice(end);
+    // N'efface JAMAIS un texte deja present : ajoute la transcription au
+    // point d'insertion (curseur), avec un espace de separation seulement
+    // si le texte existant n'en a pas deja un a cet endroit.
+    const needsSpaceBefore = before.length > 0 && !/\s$/.test(before);
+    const insertion = (needsSpaceBefore ? " " : "") + clean;
+    textarea.value = before + insertion + after;
+    const cursor = before.length + insertion.length;
+    textarea.setSelectionRange(cursor, cursor);
+    autoResize();
+  }
+
+  function wireDictation() {
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      dom.dictateBtn.disabled = true;
+      dom.dictateBtn.title = t("workspace.dictate_not_supported");
+      return;
+    }
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = DICTATION_LANG_MAP[document.documentElement.lang] || "fr-FR";
+    document.addEventListener("agentstage:langchange", () => {
+      recognition.lang = DICTATION_LANG_MAP[document.documentElement.lang] || "fr-FR";
+    });
+
+    recognition.onresult = (event) => {
+      setDictateVisualState("listening");
+      // Seuls les resultats FINAUX sont inseres dans l'entry : un resultat
+      // provisoire ("interim") peut encore changer, l'y inserer risquerait
+      // d'ecraser une modification manuelle de l'utilisateur en cours de
+      // frappe (exigence explicite : il doit pouvoir corriger avant d'envoyer).
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        if (result.isFinal) insertDictatedText(result[0].transcript);
+      }
+    };
+
+    recognition.onspeechend = () => {
+      // Etat transitoire "traitement" : la reconnaissance continue peut
+      // encore livrer un dernier resultat final juste apres la fin de la
+      // parole detectee, avant de repasser en ecoute ou de s'arreter.
+      if (state.dictation.active) setDictateVisualState("processing");
+    };
+
+    recognition.onerror = (event) => {
+      state.dictation.active = false;
+      setDictateVisualState("error");
+      const messageKey =
+        event.error === "not-allowed" || event.error === "service-not-allowed"
+          ? "workspace.dictate_mic_denied"
+          : "workspace.dictate_error";
+      showComposerError(t(messageKey));
+      setTimeout(() => setDictateVisualState(null), 1800);
+    };
+
+    recognition.onend = () => {
+      if (state.dictation.active) {
+        // Arret spontane (silence prolonge, limite du navigateur) sans que
+        // l'utilisateur ait clique pour arreter : relance pour que le mode
+        // "continu" le soit reellement.
+        try {
+          recognition.start();
+          return;
+        } catch (error) {
+          /* deja demarree, ou navigateur qui refuse : retombe en inactif */
+        }
+      }
+      state.dictation.active = false;
+      setDictateVisualState(null);
+    };
+
+    dom.dictateBtn.addEventListener("click", () => {
+      if (state.dictation.active) {
+        state.dictation.active = false;
+        setDictateVisualState(null);
+        recognition.stop();
+        return;
+      }
+      try {
+        recognition.start();
+        state.dictation.active = true;
+        setDictateVisualState("listening");
+      } catch (error) {
+        setDictateVisualState("error");
+        showComposerError(t("workspace.dictate_error"));
+        setTimeout(() => setDictateVisualState(null), 1800);
+      }
+    });
+
+    state.dictation.recognition = recognition;
+    state.dictation.supported = true;
+  }
+
+  // ---------------------------------------------------------------------
   // Init
   // ---------------------------------------------------------------------
 
@@ -2121,6 +2437,7 @@
     wireComposer();
     wireAddActionButton();
     wireConnectionsButton();
+    wireDictation();
     updateConnectionsBadge();
 
     dom.newProjectBtn.addEventListener("click", () => dom.projectForm.classList.toggle("hidden"));
@@ -2133,7 +2450,18 @@
       if (event.key === "Enter") submitNewProject();
     });
 
+    dom.newSharedProjectBtn.addEventListener("click", () => dom.sharedProjectForm.classList.toggle("hidden"));
+    dom.sharedProjectCancelBtn.addEventListener("click", () => {
+      dom.sharedProjectForm.classList.add("hidden");
+      dom.sharedProjectNameInput.value = "";
+    });
+    dom.sharedProjectCreateBtn.addEventListener("click", submitNewSharedProject);
+    dom.sharedProjectNameInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") submitNewSharedProject();
+    });
+
     dom.projectsHeader.addEventListener("click", () => toggleSection(dom.projectsSection));
+    dom.sharedProjectsHeader.addEventListener("click", () => toggleSection(dom.sharedProjectsSection));
     dom.discussionsHeader.addEventListener("click", () => toggleSection(dom.discussionsSection));
     dom.sharedDiscussionsHeader.addEventListener("click", () => toggleSection(dom.sharedDiscussionsSection));
     dom.newDiscussionBtn.addEventListener("click", startNewDiscussion);
@@ -2162,7 +2490,13 @@
       if (cursor) cursor.remove();
     });
 
-    await Promise.all([loadProjects(), loadDiscussions(true), loadEntryActions(), loadSharedConversations()]);
+    await Promise.all([
+      loadProjects(),
+      loadSharedProjects(),
+      loadDiscussions(true),
+      loadEntryActions(),
+      loadSharedConversations(),
+    ]);
 
     renderInitialQuestion();
   }

@@ -67,6 +67,7 @@ def _public_project(row: dict) -> dict:
         "createdAt": row["created_at"].isoformat(),
         "updatedAt": row["updated_at"].isoformat(),
         "conversationCount": row.get("conversation_count", 0),
+        "isShared": bool(row.get("is_shared")),
     }
 
 
@@ -164,6 +165,8 @@ def _public_workflow_run(row: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def list_projects() -> list[dict]:
+    """Projets personnels (is_shared=false) : voir list_shared_projects()
+    pour l'espace partage equivalent aux discussions communes."""
     with _db() as conn:
         rows = conn.execute(
             """
@@ -172,6 +175,7 @@ def list_projects() -> list[dict]:
             FROM projects p
             LEFT JOIN project_conversations pc ON pc.project_id = p.id
             LEFT JOIN users u ON u.id = p.created_by_user_id
+            WHERE p.is_shared = false
             GROUP BY p.id, u.display_name, u.email, u.avatar_reference
             ORDER BY p.updated_at DESC
             """
@@ -179,7 +183,29 @@ def list_projects() -> list[dict]:
     return [_public_project(r) for r in rows]
 
 
-def create_project(user_id: str, user_name: str, name: str) -> dict:
+def list_shared_projects() -> list[dict]:
+    """Projets "communs" (is_shared=true) : meme principe que
+    list_shared_conversations -- visibles par tous, jamais filtres par
+    participation prealable, puisqu'un projet commun n'a pas de notion de
+    "participant" propre (seules les discussions qu'il contient en ont une,
+    et une discussion commune auto-rejoint tout le monde a l'ouverture)."""
+    with _db() as conn:
+        rows = conn.execute(
+            """
+            SELECT p.*, count(DISTINCT pc.conversation_id) AS conversation_count,
+                   COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+            FROM projects p
+            LEFT JOIN project_conversations pc ON pc.project_id = p.id
+            LEFT JOIN users u ON u.id = p.created_by_user_id
+            WHERE p.is_shared = true
+            GROUP BY p.id, u.display_name, u.email, u.avatar_reference
+            ORDER BY p.updated_at DESC
+            """
+        ).fetchall()
+    return [_public_project(r) for r in rows]
+
+
+def create_project(user_id: str, user_name: str, name: str, is_shared: bool = False) -> dict:
     cleaned = (name or "").strip()
     if not cleaned:
         raise ValueError("Le nom du projet ne peut pas etre vide.")
@@ -188,9 +214,9 @@ def create_project(user_id: str, user_name: str, name: str) -> dict:
     project_id = new_id("proj")
     with _db() as conn:
         conn.execute(
-            """INSERT INTO projects (id, name, created_by_user_id, created_by_name)
-               VALUES (%s, %s, %s, %s)""",
-            (project_id, cleaned, user_id, user_name),
+            """INSERT INTO projects (id, name, created_by_user_id, created_by_name, is_shared)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (project_id, cleaned, user_id, user_name, is_shared),
         )
     return {
         "id": project_id,
@@ -198,6 +224,7 @@ def create_project(user_id: str, user_name: str, name: str) -> dict:
         "createdByUserId": user_id,
         "createdByName": user_name,
         "conversationCount": 0,
+        "isShared": is_shared,
     }
 
 
@@ -278,18 +305,59 @@ def list_project_conversations(
     return [_public_conversation(r) for r in rows]
 
 
+class InvalidAssociationError(ValueError):
+    """Sous-classe de ValueError levee par add_conversation_to_project quand
+    la conversation ne peut pas rejoindre ce type de projet (conversation
+    privee -> projet commun) : distincte d'un simple "introuvable" pour que
+    la route puisse renvoyer 400 (erreur de validation) plutot que 404, tout
+    en restant capturable comme un ValueError generique par du code plus
+    ancien qui ne la distinguerait pas explicitement."""
+
+
 def add_conversation_to_project(project_id: str, conversation_id: str, user_id: str) -> None:
     with _db() as conn:
-        if not conn.execute("SELECT 1 FROM projects WHERE id = %s", (project_id,)).fetchone():
+        project_row = conn.execute(
+            "SELECT is_shared FROM projects WHERE id = %s", (project_id,)
+        ).fetchone()
+        if not project_row:
             raise ValueError("Projet introuvable.")
-        if not conn.execute("SELECT 1 FROM conversations WHERE id = %s", (conversation_id,)).fetchone():
+        conv_row = conn.execute(
+            "SELECT is_shared FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if not conv_row:
             raise ValueError("Conversation introuvable.")
+        # Un projet commun ne doit jamais pouvoir exposer l'existence d'une
+        # conversation privee : sa liste de discussions (voir
+        # list_shared_project_conversations) n'est pas filtree par
+        # participation, contrairement a un projet personnel -- l'y ajouter
+        # rendrait donc cette conversation privee visible de tous.
+        if project_row["is_shared"] and not conv_row["is_shared"]:
+            raise InvalidAssociationError("Seules les discussions communes peuvent etre ajoutees a un projet commun.")
         conn.execute(
             """INSERT INTO project_conversations (project_id, conversation_id, added_by_user_id)
                VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
             (project_id, conversation_id, user_id),
         )
         conn.execute("UPDATE projects SET updated_at = now() WHERE id = %s", (project_id,))
+
+
+def list_shared_project_conversations(project_id: str) -> list[dict]:
+    """Equivalent de list_project_conversations pour un projet COMMUN :
+    jamais filtre par participation prealable (meme principe que
+    list_shared_conversations), puisque toute discussion qui peut s'y
+    trouver est necessairement elle-meme commune (voir la garde ajoutee
+    dans add_conversation_to_project ci-dessus)."""
+    with _db() as conn:
+        rows = conn.execute(
+            """SELECT c.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+               FROM conversations c
+               JOIN project_conversations pc ON pc.conversation_id = c.id
+               LEFT JOIN users u ON u.id = c.created_by_user_id
+               WHERE pc.project_id = %s
+               ORDER BY c.updated_at DESC""",
+            (project_id,),
+        ).fetchall()
+    return [_public_conversation(r) for r in rows]
 
 
 def delete_project(project_id: str, user_id: str) -> bool:
@@ -299,10 +367,16 @@ def delete_project(project_id: str, user_id: str) -> bool:
     supprimer. Renvoie False si le projet n'existe pas."""
     with _db() as conn:
         row = conn.execute(
-            "SELECT created_by_user_id FROM projects WHERE id = %s", (project_id,)
+            "SELECT created_by_user_id, is_shared FROM projects WHERE id = %s", (project_id,)
         ).fetchone()
         if not row:
             return False
+        # Meme garde que pour une conversation commune (delete_conversation
+        # ci-dessous) : un projet commun n'appartient a personne en
+        # particulier, meme son createur d'origine ne peut pas le supprimer
+        # pour tout le monde.
+        if row["is_shared"]:
+            raise PermissionError("Le projet commun ne peut pas etre supprime.")
         if row["created_by_user_id"] != user_id:
             raise PermissionError("Seul le createur peut supprimer ce projet.")
         conn.execute("DELETE FROM projects WHERE id = %s", (project_id,))

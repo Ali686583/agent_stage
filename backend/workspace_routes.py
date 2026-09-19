@@ -127,6 +127,36 @@ def _serve_file(file_id: str):
 
 
 # ---------------------------------------------------------------------------
+# Affichage du createur d'un bouton (banque de boutons) : workflow_bank vit
+# dans Postgres-jg_R, une base SEPAREE qui ne connait jamais les noms
+# d'utilisateurs (voir l'entete de librairies/workflow_bank.py) -- la
+# resolution id -> nom affichable se fait donc ici, cote glue HTTP, jamais
+# simulee ni codee en dur cote frontend.
+# ---------------------------------------------------------------------------
+
+def _with_creator_name(action: dict) -> dict:
+    creator = database.get_user_by_id(action.get("createdBy"))
+    action["createdByName"] = creator["displayName"] if creator else None
+    return action
+
+
+def _with_creator_names(actions: list) -> list:
+    creators = database.get_users_by_ids([a.get("createdBy") for a in actions])
+    for action in actions:
+        creator = creators.get(action.get("createdBy"))
+        action["createdByName"] = creator["displayName"] if creator else None
+    return actions
+
+
+def _with_entry_action_creator_names(entry_actions: list) -> list:
+    creators = database.get_users_by_ids([ea.get("actionCreatedBy") for ea in entry_actions])
+    for entry_action in entry_actions:
+        creator = creators.get(entry_action.get("actionCreatedBy"))
+        entry_action["actionCreatedByName"] = creator["displayName"] if creator else None
+    return entry_actions
+
+
+# ---------------------------------------------------------------------------
 # Projets
 # ---------------------------------------------------------------------------
 
@@ -153,13 +183,43 @@ def create_project_route():
     return jsonify(ok=True, project=project)
 
 
+@workspace_bp.route("/projects/shared", methods=["GET"])
+def list_shared_projects_route():
+    """Projets "communs" : visibles et ouvrables par TOUS les utilisateurs
+    authentifies, sans invitation (meme principe que /conversations/shared).
+    Route statique enregistree AVANT /projects/<project_id> pour ne jamais
+    en etre interceptee."""
+    user, err = _require_user()
+    if err:
+        return err
+    return jsonify(ok=True, projects=workspace.list_shared_projects())
+
+
+@workspace_bp.route("/projects/shared", methods=["POST"])
+@limiter.limit("10 per minute")
+def create_shared_project_route():
+    user, err = _require_user()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()[:200] or "Projet commun"
+    try:
+        project = workspace.create_project(user["id"], user["displayName"], name, is_shared=True)
+    except ValueError as exc:
+        return _error(400, str(exc))
+    return jsonify(ok=True, project=project)
+
+
 @workspace_bp.route("/projects/<project_id>/conversations", methods=["GET"])
 def list_project_conversations_route(project_id):
     user, err = _require_user()
     if err:
         return err
-    if not workspace.project_exists(project_id):
+    project = workspace.get_project(project_id)
+    if not project:
         return _error(404, "Projet introuvable.")
+    if project["isShared"]:
+        return jsonify(ok=True, conversations=workspace.list_shared_project_conversations(project_id))
     limit = request.args.get("limit", default=30, type=int)
     before = request.args.get("before")
     return jsonify(
@@ -239,6 +299,8 @@ def add_conversation_to_project_route(conversation_id):
         return _error(400, "projectId requis.")
     try:
         workspace.add_conversation_to_project(project_id, conversation_id, user["id"])
+    except workspace.InvalidAssociationError as exc:
+        return _error(400, str(exc))
     except ValueError as exc:
         return _error(404, str(exc))
     return jsonify(ok=True)
@@ -490,7 +552,7 @@ def list_action_bank_route():
         actions = workflow_bank.list_actions(search=search)
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
-    return jsonify(ok=True, actions=actions)
+    return jsonify(ok=True, actions=_with_creator_names(actions))
 
 
 @workspace_bp.route("/action-bank", methods=["POST"])
@@ -543,6 +605,9 @@ def create_action_bank_route():
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
 
+    # Le createur est forcement l'utilisateur courant ici : pas besoin d'une
+    # relecture base, on a deja son nom affichable sous la main.
+    action["createdByName"] = user["displayName"]
     return jsonify(ok=True, action=action, workflowRecord=workflow_record)
 
 
@@ -596,10 +661,10 @@ def update_action_bank_route(action_id):
         return _error(404, str(exc))
     except workflow_bank.VersionConflictError as exc:
         current = workflow_bank.get_action(action_id)
-        return jsonify(ok=False, error=str(exc), current=current), 409
+        return jsonify(ok=False, error=str(exc), current=_with_creator_name(current) if current else current), 409
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
-    return jsonify(ok=True, action=updated)
+    return jsonify(ok=True, action=_with_creator_name(updated))
 
 
 @workspace_bp.route("/action-bank/<action_id>", methods=["DELETE"])
@@ -646,7 +711,7 @@ def list_entry_actions_route():
         entry_actions = workflow_bank.list_entry_actions(context_id=SHARED_BUTTON_CONTEXT_ID)
     except RuntimeError:
         return _error(503, "Banque de boutons non configuree.")
-    return jsonify(ok=True, entryActions=entry_actions)
+    return jsonify(ok=True, entryActions=_with_entry_action_creator_names(entry_actions))
 
 
 @workspace_bp.route("/entry-actions", methods=["POST"])
@@ -668,7 +733,7 @@ def add_entry_action_route():
     entry_action = workflow_bank.add_entry_action(
         context_id=SHARED_BUTTON_CONTEXT_ID, action_id=action_id, created_by=user["id"], alias=alias
     )
-    return jsonify(ok=True, entryAction=entry_action)
+    return jsonify(ok=True, entryAction=_with_entry_action_creator_names([entry_action])[0])
 
 
 @workspace_bp.route("/entry-actions/<entry_action_id>", methods=["PATCH"])

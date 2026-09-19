@@ -138,6 +138,11 @@ def _create_core_tables(conn) -> None:
             );
             """
         )
+        # Migration additive (UI : "Projets communs") : meme principe que
+        # conversations.is_shared ci-dessous -- un projet commun est visible
+        # et modifiable selon la meme logique qu'une discussion commune,
+        # jamais code en dur, juste un second type de la meme table.
+        conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT false;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversations (
@@ -404,6 +409,21 @@ def get_user_by_id(user_id: str) -> dict | None:
     with _db() as conn:
         row = conn.execute("SELECT * FROM users WHERE id = %s", (user_id,)).fetchone()
     return _public_user(row) if row else None
+
+
+def get_users_by_ids(user_ids: list[str]) -> dict[str, dict]:
+    """Resout plusieurs utilisateurs en un seul aller-retour : evite un N+1
+    quand une liste (ex. la banque de boutons, dans une base Postgres
+    SEPAREE qui ne peut pas faire de JOIN SQL vers cette table users, voir
+    librairies/workflow_bank.py) doit afficher le nom actuel du createur de
+    chaque ligne. Un id introuvable (compte supprime) est silencieusement
+    absent du dict renvoye -- a l'appelant de prevoir un affichage de repli."""
+    ids = list({uid for uid in (user_ids or []) if uid})
+    if not ids:
+        return {}
+    with _db() as conn:
+        rows = conn.execute("SELECT * FROM users WHERE id = ANY(%s)", (ids,)).fetchall()
+    return {row["id"]: _public_user(row) for row in rows}
 
 
 def get_user_by_identifier(identifier: str) -> dict | None:
