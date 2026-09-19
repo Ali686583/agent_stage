@@ -880,7 +880,15 @@ html, body {
 .action-bank-results { max-height: 220px; overflow-y: auto; }
 .action-bank-result-row { position: relative; display: flex; align-items: center; }
 .action-bank-result-row .action-bank-result-btn { flex: 1; min-width: 0; }
-.action-bank-result-menu-btn {
+/* Qualifie avec l'ancetre .action-bank-result-row (au lieu du seul nom de
+   classe) : ce bouton vit dans .item-context-menu (voir showChooseActionForm),
+   dont la regle generique ".item-context-menu button { display:block;
+   width:100% }" a une specificite plus forte qu'un simple selecteur de
+   classe et ecrasait donc silencieusement toute cette mise en forme -- le
+   bouton s'etirait sur toute la largeur de la ligne au lieu de rester un
+   petit rond a droite (bug visuel trouve en usage reel : le survol vert
+   semblait "trop long"). */
+.action-bank-result-row .action-bank-result-menu-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -900,7 +908,7 @@ html, body {
   transition: opacity 0.12s ease, background-color 0.12s ease, border-color 0.12s ease;
 }
 .action-bank-result-row:hover .action-bank-result-menu-btn { opacity: 1; }
-.action-bank-result-menu-btn:hover { background: var(--color-accent-soft-bg); border-color: var(--color-accent); }
+.action-bank-result-row .action-bank-result-menu-btn:hover { background: var(--color-accent-soft-bg); border-color: var(--color-accent); }
 .action-bank-creator-label {
   padding: 4px 8px 6px;
   font-size: 0.74rem;
