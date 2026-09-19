@@ -162,6 +162,25 @@ html, body {
   background: var(--color-input-bg);
   color: var(--color-text);
 }
+/* Description facultative d'un projet commun (mission "Projets communs"
+   §2) : assez large et multiligne pour une vraie description, jamais
+   requise (voir _clean_project_description cote serveur). */
+.project-description-input {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 7px 10px;
+  border-radius: var(--radius-small);
+  border: 1px solid var(--color-border);
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  resize: vertical;
+  min-height: 54px;
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Le menu de renommage d'un projet commun a besoin de plus de largeur pour
+   que la description reste lisible (voir showRenameProjectForm). */
+.item-context-menu.wide { min-width: 280px; }
 .project-create-actions { display: flex; gap: 8px; justify-content: flex-end; }
 .project-create-actions button {
   font: inherit;
@@ -337,6 +356,20 @@ html, body {
   overflow: hidden;
 }
 .central-column.is-empty { justify-content: center; }
+/* Animation initiale (typewriter "Quelle est votre demande...") : fond
+   TOUJOURS blanc, y compris en Dark Mode -- demande explicite, jamais
+   applique ailleurs dans l'application. Des que l'ecran quitte l'etat
+   "is-empty" (envoi d'un message, ouverture d'une discussion), la classe
+   disparait et le theme normal reprend sans aucun code supplementaire. */
+:root[data-theme="dark"] .central-column.is-empty {
+  background: #ffffff;
+}
+:root[data-theme="dark"] .central-column.is-empty .initial-greeting,
+:root[data-theme="dark"] .central-column.is-empty .initial-question,
+:root[data-theme="dark"] .central-column.is-empty .typewriter-cursor {
+  color: #1a1a1a;
+  background: transparent;
+}
 
 .conversation-area {
   overflow-y: auto;
@@ -347,6 +380,13 @@ html, body {
 .central-column:not(.is-empty) .conversation-area { flex: 1 1 auto; }
 .central-column.is-empty .conversation-area { flex: 0 0 auto; padding-bottom: 0; }
 
+.initial-greeting {
+  font-size: 1rem;
+  font-weight: 500;
+  color: var(--color-muted);
+  text-align: center;
+  margin-bottom: 6px;
+}
 .initial-question {
   font-size: 1.6rem;
   font-weight: 600;
@@ -370,7 +410,7 @@ html, body {
 .message-row.assistant { justify-content: flex-start; }
 
 .message-bubble {
-  max-width: 72%;
+  max-width: 78%;
   border-radius: var(--radius-large);
   padding: 12px 16px;
   font-size: 0.92rem;
@@ -383,7 +423,7 @@ html, body {
 .message-row.assistant .message-bubble {
   background: var(--color-topbar-bg);
   color: var(--color-text);
-  max-width: 88%;
+  max-width: 94%;
 }
 .message-author {
   display: flex;
@@ -399,6 +439,90 @@ html, body {
 }
 
 .message-attachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+
+/* Actions discretes de bas de reponse : Copier / Telecharger en PDF /
+   Repondre (mission "actions sous chaque reponse" §5). Toujours en bas a
+   droite de la bulle, jamais de gros boutons -- juste une icone et deux
+   petits liens grisatres, coherents en Light/Dark Mode via les memes
+   tokens que le reste de l'interface. */
+.message-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border-light);
+}
+.msg-action-icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  border-radius: var(--radius-small);
+  padding: 0;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+.msg-action-icon-btn:hover { color: var(--color-accent-text); background: var(--color-accent-soft-bg); }
+.msg-action-icon-btn.msg-action-success { color: var(--color-accent-text); }
+.msg-action-link {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-size: 0.76rem;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+.msg-action-link:hover { color: var(--color-accent-text); text-decoration: underline; }
+
+/* Bandeau "Repondre a :" au-dessus de l'entry (mission §5) : indicateur
+   visuel clair qu'une reponse precise est ciblee, annulable a tout moment. */
+.reply-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--radius-small);
+  background: var(--color-accent-soft-bg);
+  border: 1px solid var(--color-border);
+  font-size: 0.8rem;
+}
+.reply-preview-label { font-weight: 600; color: var(--color-accent-text); flex-shrink: 0; }
+.reply-preview-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text);
+}
+.reply-preview-cancel {
+  border: 0;
+  background: none;
+  color: var(--color-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 2px 4px;
+  flex-shrink: 0;
+}
+.reply-preview-cancel:hover { color: var(--color-error); }
+
+/* Lien de bas de discussion : "Telecharger la discussion en PDF" (mission
+   §6), toujours le dernier element de la zone de conversation (voir
+   ensureConversationFooter dans workspace.js). */
+.conversation-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding: 10px clamp(0px, 2vw, 4px) 4px;
+}
 
 .message-status {
   font-size: 0.78rem;

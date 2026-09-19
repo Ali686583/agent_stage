@@ -77,6 +77,10 @@ ALLOWED_ACTIONS = {
 # une par utilisateur.
 SHARED_BUTTON_CONTEXT_ID = "shared"
 
+# Cap d'entree large ; la validation reelle (longueur, contenu vide -> None)
+# vit dans workspace.py (_clean_project_description), jamais dupliquee ici.
+MAX_PROJECT_DESCRIPTION_INPUT_LENGTH = 4000
+
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 workspace_bp = Blueprint("workspace", __name__, url_prefix="/api/workspace")
@@ -203,8 +207,13 @@ def create_shared_project_route():
         return err
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()[:200] or "Projet commun"
+    description = data.get("description")
+    if description is not None:
+        description = str(description)[:MAX_PROJECT_DESCRIPTION_INPUT_LENGTH]
     try:
-        project = workspace.create_project(user["id"], user["displayName"], name, is_shared=True)
+        project = workspace.create_project(
+            user["id"], user["displayName"], name, is_shared=True, description=description
+        )
     except ValueError as exc:
         return _error(400, str(exc))
     return jsonify(ok=True, project=project)
@@ -413,8 +422,11 @@ def rename_project_route(project_id):
         return err
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", ""))[:200]
+    description = data.get("description")
+    if description is not None:
+        description = str(description)[:MAX_PROJECT_DESCRIPTION_INPUT_LENGTH]
     try:
-        project = workspace.rename_project(project_id, user["id"], name)
+        project = workspace.rename_project(project_id, user["id"], name, description=description)
     except LookupError as exc:
         return _error(404, str(exc))
     except PermissionError as exc:

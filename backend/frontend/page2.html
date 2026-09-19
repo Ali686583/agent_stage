@@ -44,6 +44,7 @@
             <button type="button" class="sidebar-new-btn" id="ws-new-shared-project-btn" data-i18n="workspace.new_shared_project">+ Nouveau projet commun</button>
             <div class="project-create-form hidden" id="ws-shared-project-form">
               <input type="text" id="ws-shared-project-name-input" data-i18n-placeholder="workspace.shared_project_name_placeholder" placeholder="Nom du projet commun...">
+              <textarea id="ws-shared-project-description-input" class="project-description-input" rows="3" data-i18n-placeholder="workspace.add_description_placeholder" placeholder="Ajouter une description"></textarea>
               <div class="project-create-actions">
                 <button type="button" id="ws-shared-project-cancel-btn" data-i18n="workspace.cancel">Annuler</button>
                 <button type="button" class="primary" id="ws-shared-project-create-btn" data-i18n="workspace.create">Créer</button>
@@ -187,6 +188,8 @@
               <button type="button" data-model="claude">Claude</button>
             </div>
 
+            <div class="reply-preview hidden" id="ws-reply-preview"></div>
+
             <div class="file-chips" id="ws-file-chips"></div>
 
             <textarea id="ws-textarea" rows="1" data-i18n-placeholder="workspace.entry_placeholder" placeholder="Saisissez votre demande..."></textarea>
@@ -235,8 +238,11 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/4.2.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/5.0.8/jspdf.plugin.autotable.min.js"></script>
   <script src="theme.js"></script>
   <script src="i18n.js"></script>
+  <script src="pdf-export.js"></script>
   <script src="workspace.js"></script>
 </body>
 </html>

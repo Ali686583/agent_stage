@@ -143,6 +143,12 @@ def _create_core_tables(conn) -> None:
         # et modifiable selon la meme logique qu'une discussion commune,
         # jamais code en dur, juste un second type de la meme table.
         conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_shared BOOLEAN NOT NULL DEFAULT false;")
+        # Migration additive : description facultative d'un projet (utilisee
+        # d'abord par l'UI "Projets communs", mais le champ est generique --
+        # une valeur NULL/absente est traitee comme "pas de description",
+        # jamais une erreur, pour rester compatible avec tous les projets
+        # crees avant cette colonne.
+        conn.execute("ALTER TABLE projects ADD COLUMN IF NOT EXISTS description TEXT;")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conversations (

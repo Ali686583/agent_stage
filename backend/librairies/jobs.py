@@ -53,6 +53,65 @@ N8N_TIMEOUT_SECONDS = int(os.environ.get("N8N_TIMEOUT_SECONDS", "90"))
 N8N_API_URL = os.environ.get("N8N_API_URL", "").rstrip("/")
 
 
+def _extract_result_text(result: dict) -> str:
+    """Texte lisible d'un resultat deja persiste (reponse assistant d'un
+    tour precedent), utilise pour construire le contexte "Repondre a une
+    reponse" ci-dessous. Meme logique que extractMessagePlainText() cote
+    frontend (workspace.js), volontairement dupliquee en Python plutot que
+    partagee : ce module ne peut pas importer du JS, et la logique est assez
+    courte pour ne pas justifier un endpoint dedie."""
+    blocks = ((result or {}).get("response") or {}).get("blocks") or []
+    parts = []
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "table":
+            header = " | ".join(str(h) for h in (block.get("headers") or []))
+            rows = "\n".join(" | ".join(str(c) for c in row) for row in (block.get("rows") or []))
+            joined = "\n".join(part for part in (header, rows) if part)
+            if joined:
+                parts.append(joined)
+        else:
+            content = block.get("content") or block.get("text") or block.get("label") or ""
+            if content:
+                parts.append(content)
+    return "\n\n".join(parts)
+
+
+def _build_prompt_with_reply_context(message_text: str, source_result_ids: list[str]) -> str:
+    """Bouton "Repondre" (mission §5) : sans ceci, sourceResultIds n'etait
+    transmis a n8n que comme un id opaque que les workflows actuels
+    n'exploitent pas -- l'IA n'avait donc aucune idee de QUELLE reponse
+    l'utilisateur visait. Plutot que de modifier chaque workflow n8n (le
+    "chatgpt"/"claude" par defaut, plus tous les boutons de la banque) pour
+    qu'ils sachent resoudre un sourceResultId, on enrichit ici le SEUL champ
+    que tous lisent deja (`prompt`) : aucune modification n8n necessaire,
+    fonctionne immediatement avec tout workflow existant ou futur."""
+    if not source_result_ids:
+        return message_text
+    referenced_texts = []
+    for result_id in source_result_ids:
+        try:
+            referenced_result = workspace.get_result(result_id)
+        except Exception:
+            referenced_result = None
+        if not referenced_result:
+            continue
+        text = _extract_result_text(referenced_result)
+        if text:
+            referenced_texts.append(text)
+    if not referenced_texts:
+        return message_text
+    quoted = "\n\n---\n\n".join(referenced_texts)
+    return (
+        "L'utilisateur repond specifiquement a la reponse precedente suivante "
+        "(contexte a prendre en compte, ne pas la reproduire telle quelle) :\n"
+        f"{quoted}\n\n"
+        "Nouvelle demande de l'utilisateur, en reponse a ce contexte precis :\n"
+        f"{message_text}"
+    )
+
+
 def _fail(run_id: str, conversation_id: str, message_id: str, request_id: str, status: str, error: str) -> None:
     workspace.complete_workflow_run(run_id, status=status, error=error)
     try:
@@ -163,9 +222,11 @@ def execute_workflow_run(
             }
         )
 
+    prompt_text = _build_prompt_with_reply_context(message_text, source_result_ids)
+
     payload = {
         # Contrat minimal cote n8n : prompt/provider/conversationId/userId.
-        "prompt": message_text,
+        "prompt": prompt_text,
         "provider": model,
         "conversationId": conversation_id,
         "userId": user_id,

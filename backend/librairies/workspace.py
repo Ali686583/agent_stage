@@ -29,6 +29,7 @@ _logger = logging.getLogger(__name__)
 
 MAX_TITLE_LENGTH = 80
 MAX_PROJECT_NAME_LENGTH = 120
+MAX_PROJECT_DESCRIPTION_LENGTH = 2000
 
 
 def new_id(prefix: str) -> str:
@@ -68,6 +69,7 @@ def _public_project(row: dict) -> dict:
         "updatedAt": row["updated_at"].isoformat(),
         "conversationCount": row.get("conversation_count", 0),
         "isShared": bool(row.get("is_shared")),
+        "description": row.get("description"),
     }
 
 
@@ -205,18 +207,35 @@ def list_shared_projects() -> list[dict]:
     return [_public_project(r) for r in rows]
 
 
-def create_project(user_id: str, user_name: str, name: str, is_shared: bool = False) -> dict:
+def _clean_project_description(description: str | None) -> str | None:
+    """Description facultative (mission "Projets communs" §2) : une valeur
+    vide/absente est toujours acceptee (ne bloque jamais la creation ni
+    l'enregistrement), jamais requise contrairement au nom."""
+    if description is None:
+        return None
+    cleaned = description.strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > MAX_PROJECT_DESCRIPTION_LENGTH:
+        raise ValueError(f"La description doit faire moins de {MAX_PROJECT_DESCRIPTION_LENGTH} caracteres.")
+    return cleaned
+
+
+def create_project(
+    user_id: str, user_name: str, name: str, is_shared: bool = False, description: str | None = None
+) -> dict:
     cleaned = (name or "").strip()
     if not cleaned:
         raise ValueError("Le nom du projet ne peut pas etre vide.")
     if len(cleaned) > MAX_PROJECT_NAME_LENGTH:
         raise ValueError(f"Le nom du projet doit faire moins de {MAX_PROJECT_NAME_LENGTH} caracteres.")
+    cleaned_description = _clean_project_description(description)
     project_id = new_id("proj")
     with _db() as conn:
         conn.execute(
-            """INSERT INTO projects (id, name, created_by_user_id, created_by_name, is_shared)
-               VALUES (%s, %s, %s, %s, %s)""",
-            (project_id, cleaned, user_id, user_name, is_shared),
+            """INSERT INTO projects (id, name, created_by_user_id, created_by_name, is_shared, description)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (project_id, cleaned, user_id, user_name, is_shared, cleaned_description),
         )
     return {
         "id": project_id,
@@ -225,6 +244,7 @@ def create_project(user_id: str, user_name: str, name: str, is_shared: bool = Fa
         "createdByName": user_name,
         "conversationCount": 0,
         "isShared": is_shared,
+        "description": cleaned_description,
     }
 
 
@@ -251,7 +271,12 @@ def get_project(project_id: str) -> dict | None:
     return _public_project(row) if row else None
 
 
-def rename_project(project_id: str, user_id: str, name: str) -> dict:
+def rename_project(project_id: str, user_id: str, name: str, description: str | None = None) -> dict:
+    """Renomme le projet et, si `description` est fourni (meme methode que
+    pour name/instruction des boutons partages : cf. workflow_bank.py),
+    met aussi a jour sa description. `description=None` signifie "champ non
+    envoye par le client" et laisse la valeur en base inchangee -- pour
+    l'effacer explicitement, l'appelant doit envoyer une chaine vide."""
     cleaned = (name or "").strip().replace("<", "").replace(">", "")
     if not cleaned:
         raise ValueError("Le nom du projet ne peut pas etre vide.")
@@ -259,15 +284,19 @@ def rename_project(project_id: str, user_id: str, name: str) -> dict:
         raise ValueError(f"Le nom du projet doit faire moins de {MAX_PROJECT_NAME_LENGTH} caracteres.")
     with _db() as conn:
         row = conn.execute(
-            "SELECT created_by_user_id FROM projects WHERE id = %s", (project_id,)
+            "SELECT created_by_user_id, description FROM projects WHERE id = %s", (project_id,)
         ).fetchone()
         if not row:
             raise LookupError("Projet introuvable.")
         if row["created_by_user_id"] != user_id:
             raise PermissionError("Seul le createur peut renommer ce projet.")
+        if description is None:
+            new_description = row["description"]
+        else:
+            new_description = _clean_project_description(description)
         conn.execute(
-            "UPDATE projects SET name = %s, updated_at = now() WHERE id = %s",
-            (cleaned, project_id),
+            "UPDATE projects SET name = %s, description = %s, updated_at = now() WHERE id = %s",
+            (cleaned, new_description, project_id),
         )
     return get_project(project_id)
 

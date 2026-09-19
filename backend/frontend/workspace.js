@@ -43,6 +43,15 @@
     eventSource: null,
     seenMessageIds: new Set(),
     lastSeenSeq: 0,
+    // Messages de la conversation actuellement affichee, dans l'ordre :
+    // sert uniquement a "Telecharger la discussion en PDF" (jamais
+    // rejoue vers le serveur, purement un miroir local de ce qui est
+    // deja rendu a l'ecran).
+    currentMessages: [],
+    // "Repondre" a une reponse precise (mission §5) : reutilise le champ
+    // sourceResultIds deja accepte de bout en bout par le backend/n8n
+    // (voir librairies/jobs.py) plutot que d'inventer un second mecanisme.
+    replyPreviewText: "",
     typingUsers: new Map(), // userId -> { displayName, avatarUrl, timeoutId }
     lastTypingPingAt: 0,
     pendingRequests: new Map(), // requestId -> { loadingRow, showSendError } (Phase 4, reponses asynchrones)
@@ -158,6 +167,7 @@
     dom.newSharedProjectBtn = document.getElementById("ws-new-shared-project-btn");
     dom.sharedProjectForm = document.getElementById("ws-shared-project-form");
     dom.sharedProjectNameInput = document.getElementById("ws-shared-project-name-input");
+    dom.sharedProjectDescriptionInput = document.getElementById("ws-shared-project-description-input");
     dom.sharedProjectCancelBtn = document.getElementById("ws-shared-project-cancel-btn");
     dom.sharedProjectCreateBtn = document.getElementById("ws-shared-project-create-btn");
     dom.discussionsSection = document.getElementById("ws-discussions-section");
@@ -177,6 +187,7 @@
     dom.composer = document.getElementById("ws-composer");
     dom.composerTextarea = document.getElementById("ws-textarea");
     dom.fileChips = document.getElementById("ws-file-chips");
+    dom.replyPreview = document.getElementById("ws-reply-preview");
     dom.fileInput = document.getElementById("ws-file-input");
     dom.attachBtn = document.getElementById("ws-attach-btn");
     dom.sendBtn = document.getElementById("ws-send-btn");
@@ -342,6 +353,7 @@
         applyUserToUI();
         dom.nicknameForm.classList.add("hidden");
         loadDiscussions(true);
+        refreshInitialGreetingIfVisible();
       }
     });
     dom.nicknameRemove.addEventListener("click", async () => {
@@ -351,6 +363,7 @@
         applyUserToUI();
         dom.nicknameForm.classList.add("hidden");
         loadDiscussions(true);
+        refreshInitialGreetingIfVisible();
       }
     });
 
@@ -542,11 +555,28 @@
     // (cliquer dans le champ, etc.) ne le fasse pas disparaitre.
     menu.onclick = (event) => event.stopPropagation();
     menu.innerHTML = "";
+    // La description n'est proposee que pour les projets communs (mission
+    // §2) : le champ n'existe pas pour un projet personnel, comportement
+    // inchange pour ne rien casser la (rename_project accepte de toute
+    // facon description=undefined sans y toucher, voir workspace.py).
+    if (project.isShared) menu.classList.add("wide");
     menu.appendChild(el("div", { class: "menu-label", text: t("workspace.rename_project") }));
     const input = el("input", { type: "text", value: project.name });
     input.value = project.name;
-    const form = el("div", { class: "project-create-form" }, [
-      input,
+    const formChildren = [input];
+    let descriptionInput = null;
+    if (project.isShared) {
+      // Deja enregistree lors d'une modification precedente : reaffichee
+      // automatiquement dans le champ (mission §2, dernier point).
+      descriptionInput = el("textarea", {
+        class: "project-description-input",
+        rows: "3",
+        placeholder: t("workspace.add_description_placeholder"),
+      });
+      descriptionInput.value = project.description || "";
+      formChildren.push(descriptionInput);
+    }
+    formChildren.push(
       el("div", { class: "project-create-actions" }, [
         el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
         el("button", {
@@ -557,16 +587,16 @@
             event.stopPropagation();
             const name = input.value.trim();
             if (!name) return;
-            const { ok } = await api(`/projects/${project.id}`, {
-              method: "PATCH",
-              body: JSON.stringify({ name }),
-            });
+            const body = { name };
+            if (descriptionInput) body.description = descriptionInput.value.trim();
+            const { ok } = await api(`/projects/${project.id}`, { method: "PATCH", body: JSON.stringify(body) });
             closeContextMenu();
             if (ok) await (project.isShared ? loadSharedProjects() : loadProjects());
           },
         }),
-      ]),
-    ]);
+      ])
+    );
+    const form = el("div", { class: "project-create-form" }, formChildren);
     menu.appendChild(form);
     input.focus();
     input.select();
@@ -632,9 +662,17 @@
   async function submitNewSharedProject() {
     const name = dom.sharedProjectNameInput.value.trim();
     if (!name) return;
-    const { ok, data } = await api("/projects/shared", { method: "POST", body: JSON.stringify({ name }) });
+    // Description facultative (mission "Projets communs" §2) : son absence
+    // ne doit jamais empecher la creation, on envoie simplement une chaine
+    // vide que le serveur traite comme "pas de description".
+    const description = dom.sharedProjectDescriptionInput.value.trim();
+    const { ok, data } = await api("/projects/shared", {
+      method: "POST",
+      body: JSON.stringify({ name, description }),
+    });
     if (ok && data.ok) {
       dom.sharedProjectNameInput.value = "";
+      dom.sharedProjectDescriptionInput.value = "";
       dom.sharedProjectForm.classList.add("hidden");
       await loadSharedProjects();
     }
@@ -887,6 +925,7 @@
     disconnectRealtime();
     state.conversationId = null;
     state.conversationTitle = "";
+    state.currentMessages = [];
     resetComposer();
     renderInitialQuestion();
     document.querySelectorAll(".sidebar-item.active").forEach((n) => n.classList.remove("active"));
@@ -994,6 +1033,7 @@
     dom.conversationArea.innerHTML = "";
     state.seenMessageIds = new Set();
     state.lastSeenSeq = 0;
+    state.currentMessages = [];
     data.messages.forEach((message) => {
       state.seenMessageIds.add(message.id);
       if (message.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, message.seq);
@@ -1129,6 +1169,9 @@
       ]);
       dom.conversationArea.appendChild(row);
     });
+    // Garde le lien "Telecharger la discussion en PDF" en tout dernier
+    // (ne le CREE pas ici : rien a exporter tant qu'aucun message n'existe).
+    if (document.getElementById("ws-conversation-footer")) ensureConversationFooter();
     scrollToBottom();
   }
 
@@ -1140,9 +1183,24 @@
     api(`/conversations/${state.conversationId}/typing`, { method: "POST" });
   }
 
+  // Pseudo reellement defini par l'utilisateur : meme comparaison que dans
+  // wireProfileMenu() (displayName === email <=> aucun pseudo choisi, voir
+  // database.display_name_for cote serveur, qui applique deja ce repli).
+  // Jamais invente cote client : si aucun pseudo, on n'affiche simplement rien.
+  function userHasPseudo() {
+    return !!(state.user && state.user.displayName && state.user.displayName !== state.user.email);
+  }
+
   function renderInitialQuestion() {
     dom.centralColumn.classList.add("is-empty");
     dom.conversationArea.innerHTML = "";
+    if (userHasPseudo()) {
+      dom.conversationArea.appendChild(
+        el("div", { class: "initial-greeting", id: "ws-initial-greeting" }, [
+          t("workspace.greeting_prefix") + " " + state.user.displayName + t("workspace.greeting_suffix"),
+        ])
+      );
+    }
     const heading = el("div", { class: "initial-question" });
     const span = el("span", {});
     const cursor = el("span", { class: "typewriter-cursor" });
@@ -1150,6 +1208,27 @@
     heading.appendChild(cursor);
     dom.conversationArea.appendChild(heading);
     typewrite(span, t("workspace.initial_question"), cursor);
+  }
+
+  // Met a jour la ligne "Bonjour ..." sans relancer le typewriter, si
+  // l'ecran d'accueil est actuellement affiche (appele apres un changement
+  // de pseudonyme, voir wireProfileMenu()).
+  function refreshInitialGreetingIfVisible() {
+    if (!dom.centralColumn.classList.contains("is-empty")) return;
+    const existing = document.getElementById("ws-initial-greeting");
+    if (userHasPseudo()) {
+      const text = t("workspace.greeting_prefix") + " " + state.user.displayName + t("workspace.greeting_suffix");
+      if (existing) {
+        existing.textContent = text;
+      } else {
+        dom.conversationArea.insertBefore(
+          el("div", { class: "initial-greeting", id: "ws-initial-greeting" }, [text]),
+          dom.conversationArea.firstChild
+        );
+      }
+    } else if (existing) {
+      existing.remove();
+    }
   }
 
   function typewrite(target, text, cursor) {
@@ -1179,6 +1258,7 @@
   // ---------------------------------------------------------------------
 
   function renderMessage(message) {
+    state.currentMessages.push(message);
     const row = el("div", { class: `message-row ${message.role}` });
     const bubble = el("div", { class: "message-bubble" });
     if (message.role === "assistant") {
@@ -1203,9 +1283,174 @@
       message.attachments.forEach((file) => attWrap.appendChild(fileChipReadOnly(file)));
       bubble.appendChild(attWrap);
     }
+    // Actions discretes de bas de reponse (mission §5) : uniquement sur les
+    // reponses de l'agent, jamais sur les messages de l'utilisateur.
+    if (message.role === "assistant") {
+      bubble.appendChild(renderMessageActions(message));
+    }
     row.appendChild(bubble);
     dom.conversationArea.appendChild(row);
+    ensureConversationFooter();
     return row;
+  }
+
+  // ---------------------------------------------------------------------
+  // Actions de reponse : Copier / Telecharger en PDF / Repondre (mission §5)
+  // ---------------------------------------------------------------------
+
+  function extractMessagePlainText(message) {
+    if (Array.isArray(message.blocks) && message.blocks.length) {
+      return message.blocks
+        .map((block) => {
+          if (!block) return "";
+          if (block.type === "table") {
+            const header = (block.headers || []).join(" | ");
+            const rows = (block.rows || []).map((row) => row.join(" | ")).join("\n");
+            return [header, rows].filter(Boolean).join("\n");
+          }
+          return block.content || block.text || block.label || "";
+        })
+        .filter(Boolean)
+        .join("\n\n");
+    }
+    return message.content || "";
+  }
+
+  function copyIconSvg() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.innerHTML =
+      '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>';
+    return svg;
+  }
+
+  function checkIconSvg() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "14");
+    svg.setAttribute("height", "14");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2.4");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.innerHTML = '<polyline points="20 6 9 17 4 12"/>';
+    return svg;
+  }
+
+  async function copyMessageContent(message, btn) {
+    const text = extractMessagePlainText(message);
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Repli pour un contexte sans Clipboard API (navigateur ancien,
+        // page non servie en HTTPS) : jamais planter l'action pour autant.
+        const textarea = document.createElement("textarea");
+        textarea.value = text;
+        textarea.style.position = "fixed";
+        textarea.style.opacity = "0";
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand("copy");
+        document.body.removeChild(textarea);
+      }
+      btn.innerHTML = "";
+      btn.appendChild(checkIconSvg());
+      btn.classList.add("msg-action-success");
+      setTimeout(() => {
+        btn.innerHTML = "";
+        btn.appendChild(copyIconSvg());
+        btn.classList.remove("msg-action-success");
+      }, 1500);
+    } catch (error) {
+      showComposerError(t("workspace.copy_error"));
+    }
+  }
+
+  function downloadMessagePdf(message, linkEl) {
+    if (!window.AgentStagePdf) {
+      showComposerError(t("workspace.pdf_export_error"));
+      return;
+    }
+    try {
+      window.AgentStagePdf.downloadMessagePdf(message, {
+        title: message.authorName,
+        subtitle: formatDate(message.createdAt),
+        filename: `${message.authorName || "reponse"}-${message.id || ""}`,
+      });
+    } catch (error) {
+      // Un echec de generation PDF ne doit jamais casser la discussion
+      // (mission §9, "cas d'erreur") : simple feedback, rien d'autre.
+      showComposerError(t("workspace.pdf_export_error"));
+    }
+  }
+
+  function renderMessageActions(message) {
+    const wrap = el("div", { class: "message-actions" });
+    const copyBtn = el(
+      "button",
+      { type: "button", class: "msg-action-icon-btn", "aria-label": t("workspace.copy_response"), title: t("workspace.copy_response") },
+      [copyIconSvg()]
+    );
+    copyBtn.addEventListener("click", () => copyMessageContent(message, copyBtn));
+    const pdfBtn = el("button", {
+      type: "button",
+      class: "msg-action-link",
+      text: t("workspace.download_pdf"),
+      onclick: () => downloadMessagePdf(message, pdfBtn),
+    });
+    const replyBtn = el("button", {
+      type: "button",
+      class: "msg-action-link",
+      text: t("workspace.reply"),
+      onclick: () => startReplyTo(message),
+    });
+    wrap.appendChild(copyBtn);
+    wrap.appendChild(pdfBtn);
+    wrap.appendChild(replyBtn);
+    return wrap;
+  }
+
+  // ---------------------------------------------------------------------
+  // Telecharger l'integralite de la discussion en PDF (mission §6) :
+  // toujours le dernier element de la zone de conversation (voir
+  // ensureConversationFooter, appele apres chaque nouveau message).
+  // ---------------------------------------------------------------------
+
+  function ensureConversationFooter() {
+    let footer = document.getElementById("ws-conversation-footer");
+    if (!footer) {
+      footer = el("div", { class: "conversation-footer", id: "ws-conversation-footer" });
+      const link = el("button", { type: "button", class: "msg-action-link", text: t("workspace.download_conversation_pdf") });
+      link.addEventListener("click", () => downloadConversationPdf(link));
+      footer.appendChild(link);
+    }
+    dom.conversationArea.appendChild(footer);
+    return footer;
+  }
+
+  function downloadConversationPdf(linkEl) {
+    if (!window.AgentStagePdf) {
+      showComposerError(t("workspace.pdf_export_error"));
+      return;
+    }
+    try {
+      window.AgentStagePdf.downloadConversationPdf(
+        { title: state.conversationTitle || t("workspace.new_discussion") },
+        state.currentMessages,
+        { filename: state.conversationTitle || "discussion" }
+      );
+    } catch (error) {
+      showComposerError(t("workspace.pdf_export_error"));
+    }
   }
 
   function fileChipReadOnly(file) {
@@ -1490,9 +1735,54 @@
     autoResize();
     state.attachments = [];
     state.sourceResultIds = [];
+    state.replyPreviewText = "";
     state.selectedWidgetIndex = null;
     renderFileChips();
     renderActionWidgets();
+    renderReplyPreview();
+  }
+
+  // ---------------------------------------------------------------------
+  // "Repondre" a une reponse precise (mission §5) : reutilise
+  // state.sourceResultIds, deja transmis au backend/n8n de bout en bout
+  // (voir librairies/jobs.py, qui enrichit desormais le prompt avec le
+  // contenu de la reponse referencee). N'empeche jamais l'usage normal de
+  // l'agent/bouton/pieces jointes/connexions selectionnes par ailleurs.
+  // ---------------------------------------------------------------------
+
+  function renderReplyPreview() {
+    dom.replyPreview.innerHTML = "";
+    if (!state.sourceResultIds.length) {
+      dom.replyPreview.classList.add("hidden");
+      return;
+    }
+    dom.replyPreview.classList.remove("hidden");
+    dom.replyPreview.appendChild(el("span", { class: "reply-preview-label", text: t("workspace.replying_to") }));
+    dom.replyPreview.appendChild(el("span", { class: "reply-preview-text", text: state.replyPreviewText }));
+    dom.replyPreview.appendChild(
+      el("button", {
+        type: "button",
+        class: "reply-preview-cancel",
+        "aria-label": t("workspace.cancel_reply"),
+        title: t("workspace.cancel_reply"),
+        text: "×",
+        onclick: cancelReply,
+      })
+    );
+  }
+
+  function startReplyTo(message) {
+    if (!message.resultId) return; // rien a referencer (ne devrait pas arriver pour une reponse assistant)
+    state.sourceResultIds = [message.resultId];
+    state.replyPreviewText = extractMessagePlainText(message).slice(0, 160);
+    renderReplyPreview();
+    dom.composerTextarea.focus();
+  }
+
+  function cancelReply() {
+    state.sourceResultIds = [];
+    state.replyPreviewText = "";
+    renderReplyPreview();
   }
 
   function autoResize() {
@@ -2193,6 +2483,8 @@
       text,
       attachments: state.attachments.slice(),
       widgetIndex: state.selectedWidgetIndex,
+      sourceResultIds: state.sourceResultIds.slice(),
+      replyPreviewText: state.replyPreviewText,
     };
     resetComposer();
 
@@ -2207,9 +2499,12 @@
             statusRow.remove();
             state.attachments = composerSnapshot.attachments;
             state.selectedWidgetIndex = composerSnapshot.widgetIndex;
+            state.sourceResultIds = composerSnapshot.sourceResultIds;
+            state.replyPreviewText = composerSnapshot.replyPreviewText;
             dom.composerTextarea.value = composerSnapshot.text;
             renderFileChips();
             renderActionWidgets();
+            renderReplyPreview();
             sendMessage();
           },
         }),
@@ -2454,6 +2749,7 @@
     dom.sharedProjectCancelBtn.addEventListener("click", () => {
       dom.sharedProjectForm.classList.add("hidden");
       dom.sharedProjectNameInput.value = "";
+      dom.sharedProjectDescriptionInput.value = "";
     });
     dom.sharedProjectCreateBtn.addEventListener("click", submitNewSharedProject);
     dom.sharedProjectNameInput.addEventListener("keydown", (event) => {
