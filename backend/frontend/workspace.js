@@ -13,13 +13,16 @@
   // legitime mais lente.
   const PENDING_REQUEST_TIMEOUT_MS = 130000;
 
+  // Mode "Message" (mission §4) : jamais un provider IA, voir data-model
+  // dans page2.html et le bypass cote serveur (workspace_routes.py).
+  const MESSAGE_MODEL = "message";
+
   const state = {
     user: null,
     conversationId: null,
     conversationTitle: "",
     model: "chatgpt",
     attachments: [], // {fileId, name, status: 'uploading'|'uploaded'|'failed'}
-    sourceResultIds: [],
     selectedWidgetIndex: null,
     // Banque de boutons/actions (Phase 5) : chargee depuis le backend
     // (Postgres-jg_R via /api/workspace/entry-actions), jamais codee en dur.
@@ -48,9 +51,13 @@
     // rejoue vers le serveur, purement un miroir local de ce qui est
     // deja rendu a l'ecran).
     currentMessages: [],
-    // "Repondre" a une reponse precise (mission §5) : reutilise le champ
-    // sourceResultIds deja accepte de bout en bout par le backend/n8n
-    // (voir librairies/jobs.py) plutot que d'inventer un second mecanisme.
+    // "Repondre" a un message precis (mission contexte+reply §2/§3) :
+    // reply_to_message_id, persiste en base (voir librairies/workspace.py),
+    // fonctionne pour N'IMPORTE QUEL message (utilisateur, "Message", IA,
+    // bouton) -- contrairement a l'ancien mecanisme sourceResultIds (toujours
+    // accepte par le backend pour compatibilite, mais plus pilote depuis
+    // cette UI : ce role est repris par replyToMessageId, plus general).
+    replyToMessageId: null,
     replyPreviewText: "",
     typingUsers: new Map(), // userId -> { displayName, avatarUrl, timeoutId }
     lastTypingPingAt: 0,
@@ -210,6 +217,7 @@
     dom.deleteAccountPanel = document.getElementById("ws-delete-account-panel");
     dom.optAvatar = document.getElementById("ws-opt-avatar");
     dom.optNickname = document.getElementById("ws-opt-nickname");
+    dom.optGoogleDrive = document.getElementById("ws-opt-google-drive");
     dom.optDeleteAccount = document.getElementById("ws-opt-delete-account");
     dom.avatarInput = document.getElementById("ws-avatar-input");
     dom.nicknameForm = document.getElementById("ws-nickname-form");
@@ -380,6 +388,59 @@
   }
 
   // ---------------------------------------------------------------------
+  // Google Drive (bouton "Resume Drive", mission §5) : connexion/deconnexion
+  // OAuth personnelle, depuis le menu profil ("Plus d'options").
+  // ---------------------------------------------------------------------
+
+  async function refreshGoogleDriveOption() {
+    const { ok, data } = await api("/integrations/google-drive/status");
+    if (!ok || !data.ok) return;
+    if (!data.configured) {
+      // Jamais une fausse promesse : si GOOGLE_OAUTH_* n'est pas configure
+      // sur ce deploiement, l'option reste invisible plutot que de proposer
+      // un bouton qui echouerait systematiquement (mission §5, ne jamais
+      // simuler un fonctionnement impossible).
+      dom.optGoogleDrive.classList.add("hidden");
+      return;
+    }
+    dom.optGoogleDrive.classList.remove("hidden");
+    dom.optGoogleDrive.textContent = data.connected
+      ? `${t("workspace.opt_disconnect_drive")}${data.googleEmail ? " (" + data.googleEmail + ")" : ""}`
+      : t("workspace.opt_connect_drive");
+    dom.optGoogleDrive.dataset.connected = data.connected ? "true" : "false";
+  }
+
+  function wireGoogleDriveOption() {
+    dom.optGoogleDrive.addEventListener("click", async () => {
+      if (dom.optGoogleDrive.dataset.connected === "true") {
+        await api("/integrations/google-drive", { method: "DELETE" });
+        await refreshGoogleDriveOption();
+        return;
+      }
+      // Flux OAuth reel : necessite une navigation complete (redirection vers
+      // l'ecran de consentement Google), jamais un simple fetch.
+      window.location.href = `${API}/integrations/google-drive/connect`;
+    });
+  }
+
+  function handleGoogleDriveRedirectStatus() {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("googleDriveStatus");
+    if (!status) return;
+    const messageKeyByStatus = {
+      connected: "workspace.google_drive_connected",
+      denied: "workspace.google_drive_error",
+      error: "workspace.google_drive_error",
+      state_mismatch: "workspace.google_drive_error",
+    };
+    showComposerError(t(messageKeyByStatus[status] || "workspace.google_drive_error"));
+    // Nettoie l'URL (jamais garder ce parametre au rechargement/partage du lien).
+    params.delete("googleDriveStatus");
+    const newSearch = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (newSearch ? `?${newSearch}` : ""));
+  }
+
+  // ---------------------------------------------------------------------
   // Sidebar : ouverture / fermeture
   // ---------------------------------------------------------------------
 
@@ -465,7 +526,7 @@
         group.classList.toggle("open", willOpen);
         if (willOpen && !loaded) {
           loaded = true;
-          await loadProjectConversations(project.id, list);
+          await loadProjectConversations(project.id, list, false);
         }
       });
       group.appendChild(header);
@@ -474,7 +535,7 @@
     });
   }
 
-  async function loadProjectConversations(projectId, listEl) {
+  async function loadProjectConversations(projectId, listEl, isSharedProject) {
     const { ok, data } = await api(`/projects/${projectId}/conversations?limit=30`);
     listEl.innerHTML = "";
     if (!ok || !data.ok) return;
@@ -483,7 +544,11 @@
       return;
     }
     data.conversations.forEach((conversation) => {
-      listEl.appendChild(renderConversationItem(conversation));
+      listEl.appendChild(
+        isSharedProject
+          ? renderSharedConversationItem(conversation, projectId)
+          : renderConversationItem(conversation, projectId)
+      );
     });
   }
 
@@ -650,7 +715,10 @@
           // Meme route que pour un projet personnel : le serveur distingue
           // deja lui-meme is_shared et renvoie la bonne liste (voir
           // list_project_conversations_route), aucune duplication necessaire ici.
-          await loadProjectConversations(project.id, list);
+          // isSharedProject=true : rend les items avec la semantique commune
+          // (menu "Deplacer dans un autre projet COMMUN", jamais de
+          // suppression -- voir renderSharedConversationItem).
+          await loadProjectConversations(project.id, list, true);
         }
       });
       group.appendChild(header);
@@ -737,7 +805,7 @@
     }
   }
 
-  function renderConversationItem(conversation) {
+  function renderConversationItem(conversation, contextProjectId) {
     const item = el("div", { class: "sidebar-item", "data-conversation-id": conversation.id });
     if (conversation.id === state.conversationId) item.classList.add("active");
     const main = el("div", { class: "sidebar-item-main" }, [
@@ -754,13 +822,32 @@
       text: "⋯",
       onclick: (event) => {
         event.stopPropagation();
-        openConversationMenu(conversation, menuBtn);
+        openConversationMenu(conversation, menuBtn, contextProjectId);
       },
     });
     item.appendChild(main);
     item.appendChild(menuBtn);
     item.addEventListener("click", () => openConversation(conversation.id));
     return item;
+  }
+
+  async function moveConversationToProject(conversationId, fromProjectId, toProjectId) {
+    const { ok, data } = await api(`/conversations/${conversationId}/move-project`, {
+      method: "POST",
+      body: JSON.stringify({ fromProjectId, toProjectId }),
+    });
+    if (!ok || !data.ok) {
+      showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+      return false;
+    }
+    // Rafraichissement complet des deux arbres (personnel + commun) : le plus
+    // simple pour garantir que la discussion disparait bien de l'ancien
+    // projet et apparait dans le nouveau, sans etat intermediaire incoherent
+    // (referme au passage les groupes deja ouverts, cout accepte pour la
+    // garantie de coherence -- mission §6, "mettre immediatement l'interface
+    // a jour").
+    await Promise.all([loadProjects(), loadSharedProjects()]);
+    return true;
   }
 
   let activeContextMenu = null;
@@ -811,7 +898,7 @@
     setTimeout(() => document.addEventListener("click", closeFixedMenu, { once: true }), 0);
   }
 
-  function openConversationMenu(conversation, anchorBtn) {
+  function openConversationMenu(conversation, anchorBtn, contextProjectId) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open" });
     menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_to_project") }));
@@ -835,6 +922,32 @@
           })
         );
       });
+    }
+    // "Deplacer dans un autre projet" (mission §6) : uniquement pertinent
+    // depuis la liste des discussions d'un projet PRECIS (contextProjectId),
+    // jamais depuis la liste generale "Discussions" ou aucun projet source
+    // n'est connu. Le projet courant n'est jamais propose comme destination.
+    if (contextProjectId) {
+      const otherProjects = state.projects.filter((p) => p.id !== contextProjectId);
+      menu.appendChild(el("div", { class: "menu-divider" }));
+      menu.appendChild(el("div", { class: "menu-label", text: t("workspace.move_to_project") }));
+      if (!otherProjects.length) {
+        menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_other_projects") }));
+      } else {
+        otherProjects.forEach((project) => {
+          menu.appendChild(
+            el("button", {
+              type: "button",
+              text: project.name,
+              onclick: async (event) => {
+                event.stopPropagation();
+                closeContextMenu();
+                await moveConversationToProject(conversation.id, contextProjectId, project.id);
+              },
+            })
+          );
+        });
+      }
     }
     if (conversation.createdByUserId === state.user.id) {
       menu.appendChild(el("div", { class: "menu-divider" }));
@@ -950,7 +1063,7 @@
     });
   }
 
-  function renderSharedConversationItem(conversation) {
+  function renderSharedConversationItem(conversation, contextProjectId) {
     const item = el("div", { class: "sidebar-item", "data-conversation-id": conversation.id });
     if (conversation.id === state.conversationId) item.classList.add("active");
     const main = el("div", { class: "sidebar-item-main" }, [
@@ -967,7 +1080,7 @@
       text: "⋯",
       onclick: (event) => {
         event.stopPropagation();
-        openSharedConversationMenu(conversation, menuBtn);
+        openSharedConversationMenu(conversation, menuBtn, contextProjectId);
       },
     });
     item.appendChild(main);
@@ -980,7 +1093,7 @@
     return item;
   }
 
-  function openSharedConversationMenu(conversation, anchorBtn) {
+  function openSharedConversationMenu(conversation, anchorBtn, contextProjectId) {
     closeContextMenu();
     const menu = el("div", { class: "item-context-menu open" });
     menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_to_project") }));
@@ -1004,6 +1117,33 @@
           })
         );
       });
+    }
+    // "Deplacer dans un autre projet commun" (mission §7) : le backend
+    // revalide integralement le droit de deplacement (participation a la
+    // discussion + type commun/commun compatible, voir
+    // workspace.move_conversation_to_project) -- cette liste cote-client
+    // n'est qu'un confort d'affichage, jamais la source de la permission.
+    if (contextProjectId) {
+      const otherProjects = state.sharedProjects.filter((p) => p.id !== contextProjectId);
+      menu.appendChild(el("div", { class: "menu-divider" }));
+      menu.appendChild(el("div", { class: "menu-label", text: t("workspace.move_to_shared_project") }));
+      if (!otherProjects.length) {
+        menu.appendChild(el("div", { class: "sidebar-empty", text: t("workspace.no_other_projects") }));
+      } else {
+        otherProjects.forEach((project) => {
+          menu.appendChild(
+            el("button", {
+              type: "button",
+              text: project.name,
+              onclick: async (event) => {
+                event.stopPropagation();
+                closeContextMenu();
+                await moveConversationToProject(conversation.id, contextProjectId, project.id);
+              },
+            })
+          );
+        });
+      }
     }
     anchorBtn.parentElement.appendChild(menu);
     activeContextMenu = menu;
@@ -1126,7 +1266,21 @@
       }
       const pending = data.requestId && resolvePendingRequest(data.requestId);
       if (!pending) return; // echec d'une requete d'un autre onglet/utilisateur : rien a faire ici
-      const statusMap = { n8n_timeout: "workspace.error_timeout", workflow_not_configured: "workspace.error_not_configured" };
+      const statusMap = {
+        n8n_timeout: "workspace.error_timeout",
+        workflow_not_configured: "workspace.error_not_configured",
+        // Bouton "Resume Drive" (mission §5) : chaque code d'echec distinct
+        // recoit un message clair, jamais une trace technique brute.
+        google_drive_not_configured: "workspace.error_not_configured",
+        google_drive_not_connected: "workspace.google_drive_not_connected",
+        google_drive_no_reference_found: "workspace.google_drive_no_reference_found",
+        google_drive_document_not_found: "workspace.google_drive_document_not_found",
+        google_drive_permission_denied: "workspace.google_drive_permission_denied",
+        google_drive_document_too_large: "workspace.google_drive_document_too_large",
+        google_drive_unsupported_file_type: "workspace.google_drive_unsupported_file_type",
+        google_drive_empty_document: "workspace.google_drive_empty_document",
+        google_drive_drive_api_error: "workspace.google_drive_api_error",
+      };
       pending.showSendError(t(statusMap[data.error] || "workspace.error_generic"));
     });
 
@@ -1260,6 +1414,7 @@
   function renderMessage(message) {
     state.currentMessages.push(message);
     const row = el("div", { class: `message-row ${message.role}` });
+    if (message.id) row.setAttribute("data-message-id", message.id);
     const bubble = el("div", { class: "message-bubble" });
     if (message.role === "assistant") {
       bubble.appendChild(el("div", { class: "message-author" }, [message.authorName]));
@@ -1270,6 +1425,12 @@
           message.authorName,
         ])
       );
+    }
+    // Aperçu du message auquel celui-ci repond (mission "Repondre" §3) :
+    // persistant (vient du backend, reste apres actualisation/reouverture),
+    // cliquable pour remonter jusqu'au message original.
+    if (message.replyTo) {
+      bubble.appendChild(renderReplyContextBubble(message.replyTo));
     }
     if (message.blocks && message.blocks.length) {
       renderBlocks(bubble, message.blocks);
@@ -1283,15 +1444,76 @@
       message.attachments.forEach((file) => attWrap.appendChild(fileChipReadOnly(file)));
       bubble.appendChild(attWrap);
     }
-    // Actions discretes de bas de reponse (mission §5) : uniquement sur les
-    // reponses de l'agent, jamais sur les messages de l'utilisateur.
+    // Actions discretes de bas de reponse (mission §5) : PDF/Copier restent
+    // reserves a l'agent ; "Repondre" est desormais disponible sur TOUT
+    // message (mission contexte+reply §2 : repondre a un message precis
+    // n'est pas limite aux reponses IA, ex. repondre a un "Message" d'un
+    // autre participant dans une discussion commune).
     if (message.role === "assistant") {
       bubble.appendChild(renderMessageActions(message));
+    } else if (message.id) {
+      bubble.appendChild(renderUserMessageActions(message));
     }
     row.appendChild(bubble);
     dom.conversationArea.appendChild(row);
     ensureConversationFooter();
     return row;
+  }
+
+  // ---------------------------------------------------------------------
+  // Aperçu "en reponse a" persistant au-dessus d'un message (mission §3)
+  // ---------------------------------------------------------------------
+
+  function renderReplyContextBubble(replyTo) {
+    const bubble = el("div", {
+      class: "reply-context-bubble",
+      role: "button",
+      tabindex: "0",
+      "aria-label": t("workspace.replying_to"),
+    });
+    if (replyTo.unavailable) {
+      bubble.classList.add("unavailable");
+      bubble.appendChild(el("span", { class: "reply-context-text", text: t("workspace.original_message_unavailable") }));
+    } else {
+      bubble.appendChild(el("span", { class: "reply-context-author", text: replyTo.authorName || "" }));
+      bubble.appendChild(el("span", { class: "reply-context-text", text: replyTo.excerpt || "" }));
+      const activate = () => scrollToMessageAndHighlight(replyTo.id);
+      bubble.addEventListener("click", activate);
+      bubble.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          activate();
+        }
+      });
+    }
+    return bubble;
+  }
+
+  function scrollToMessageAndHighlight(messageId) {
+    const target = dom.conversationArea.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+    if (!target) {
+      // Message pas (encore) charge dans cette vue (au-dela de la fenetre
+      // d'historique deja recuperee) : jamais une erreur bloquante, un
+      // simple signal discret (mission §13, gerer proprement sans casser
+      // l'affichage existant).
+      showComposerError(t("workspace.original_message_not_loaded"));
+      return;
+    }
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("message-row-highlight");
+    setTimeout(() => target.classList.remove("message-row-highlight"), 1600);
+  }
+
+  function renderUserMessageActions(message) {
+    const wrap = el("div", { class: "message-actions message-actions-user" });
+    const replyBtn = el("button", {
+      type: "button",
+      class: "msg-action-link",
+      text: t("workspace.reply"),
+      onclick: () => startReplyTo(message),
+    });
+    wrap.appendChild(replyBtn);
+    return wrap;
   }
 
   // ---------------------------------------------------------------------
@@ -1401,12 +1623,6 @@
       [copyIconSvg()]
     );
     copyBtn.addEventListener("click", () => copyMessageContent(message, copyBtn));
-    const pdfBtn = el("button", {
-      type: "button",
-      class: "msg-action-link",
-      text: t("workspace.download_pdf"),
-      onclick: () => downloadMessagePdf(message, pdfBtn),
-    });
     const replyBtn = el("button", {
       type: "button",
       class: "msg-action-link",
@@ -1414,7 +1630,20 @@
       onclick: () => startReplyTo(message),
     });
     wrap.appendChild(copyBtn);
-    wrap.appendChild(pdfBtn);
+    // "Telecharger en PDF" par reponse individuelle (mission PDF §8) :
+    // uniquement utile/affiche quand la reponse provient d'un bouton/workflow
+    // de la banque (message.actionId non nul) -- une reponse ChatGPT/Claude
+    // "classique" (sans bouton) n'a pas besoin de ce PDF individuel, "Copier"
+    // reste suffisant pour elle.
+    if (message.actionId) {
+      const pdfBtn = el("button", {
+        type: "button",
+        class: "msg-action-link",
+        text: t("workspace.download_pdf"),
+        onclick: () => downloadMessagePdf(message, pdfBtn),
+      });
+      wrap.appendChild(pdfBtn);
+    }
     wrap.appendChild(replyBtn);
     return wrap;
   }
@@ -1734,7 +1963,7 @@
     dom.composerTextarea.value = "";
     autoResize();
     state.attachments = [];
-    state.sourceResultIds = [];
+    state.replyToMessageId = null;
     state.replyPreviewText = "";
     state.selectedWidgetIndex = null;
     renderFileChips();
@@ -1743,16 +1972,18 @@
   }
 
   // ---------------------------------------------------------------------
-  // "Repondre" a une reponse precise (mission §5) : reutilise
-  // state.sourceResultIds, deja transmis au backend/n8n de bout en bout
-  // (voir librairies/jobs.py, qui enrichit desormais le prompt avec le
-  // contenu de la reponse referencee). N'empeche jamais l'usage normal de
-  // l'agent/bouton/pieces jointes/connexions selectionnes par ailleurs.
+  // "Repondre" a un message precis (mission contexte+reply §2/§3) :
+  // state.replyToMessageId est persiste en base sur le message envoye (voir
+  // librairies/workspace.py::add_message), et le backend (librairies/jobs.py)
+  // en fait le contexte PRIORITAIRE de la prochaine demande IA. Fonctionne
+  // pour n'importe quel message (utilisateur, "Message", IA, bouton).
+  // N'empeche jamais l'usage normal de l'agent/bouton/pieces jointes/
+  // connexions selectionnes par ailleurs.
   // ---------------------------------------------------------------------
 
   function renderReplyPreview() {
     dom.replyPreview.innerHTML = "";
-    if (!state.sourceResultIds.length) {
+    if (!state.replyToMessageId) {
       dom.replyPreview.classList.add("hidden");
       return;
     }
@@ -1772,15 +2003,15 @@
   }
 
   function startReplyTo(message) {
-    if (!message.resultId) return; // rien a referencer (ne devrait pas arriver pour une reponse assistant)
-    state.sourceResultIds = [message.resultId];
-    state.replyPreviewText = extractMessagePlainText(message).slice(0, 160);
+    if (!message.id) return;
+    state.replyToMessageId = message.id;
+    state.replyPreviewText = extractMessagePlainText(message).slice(0, 160) || t("workspace.attachment_only");
     renderReplyPreview();
     dom.composerTextarea.focus();
   }
 
   function cancelReply() {
-    state.sourceResultIds = [];
+    state.replyToMessageId = null;
     state.replyPreviewText = "";
     renderReplyPreview();
   }
@@ -1797,6 +2028,9 @@
         dom.modelButtons.forEach((b) => b.classList.toggle("active", b === btn));
         dom.sendBtn.classList.toggle("model-claude", state.model === "claude");
         dom.sendBtn.classList.toggle("model-chatgpt", state.model === "chatgpt");
+        // Mode "Message" (mission §4) : meme vert que le logo, voir
+        // --brand-green dans theme.css et .send-btn.model-message ci-dessous.
+        dom.sendBtn.classList.toggle("model-message", state.model === "message");
       });
     });
   }
@@ -2430,6 +2664,8 @@
     }
     if (stillUploading) return;
 
+    const isMessageMode = state.model === MESSAGE_MODEL;
+
     state.sending = true;
     updateSendButtonState();
     dom.centralColumn.classList.remove("is-empty");
@@ -2438,23 +2674,34 @@
       dom.conversationArea.innerHTML = "";
     }
 
-    const userMessageRow = renderMessage({
+    // Objet mutable (pas juste un litteral jete) : une fois l'id reel connu
+    // (reponse HTTP ci-dessous), on le complete EN PLACE plutot que de
+    // laisser ce rendu optimiste fige sans id -- sinon "Repondre" a SON
+    // PROPRE message tout juste envoye resterait indisponible tant que la
+    // conversation n'est pas rouverte (voir la mise a jour plus bas).
+    const optimisticUserMessage = {
       role: "user",
       authorName: state.user.displayName,
       authorAvatarUrl: state.user.avatarUrl,
       content: text,
       blocks: null,
       attachments: readyAttachments.map((a) => ({ id: a.fileId, name: a.name })),
-    });
+    };
+    const userMessageRow = renderMessage(optimisticUserMessage);
     scrollToBottom();
 
-    const loadingRow = el("div", { class: "message-row assistant" }, [
-      el("div", { class: "message-bubble" }, [
-        el("div", { class: "loader-dots" }, [el("span"), el("span"), el("span")]),
-      ]),
-    ]);
-    dom.conversationArea.appendChild(loadingRow);
-    scrollToBottom();
+    // Mode "Message" (mission §4) : aucune IA n'est appelee, donc aucun
+    // loader "en cours de generation" a afficher -- rien a attendre.
+    let loadingRow = null;
+    if (!isMessageMode) {
+      loadingRow = el("div", { class: "message-row assistant" }, [
+        el("div", { class: "message-bubble" }, [
+          el("div", { class: "loader-dots" }, [el("span"), el("span"), el("span")]),
+        ]),
+      ]);
+      dom.conversationArea.appendChild(loadingRow);
+      scrollToBottom();
+    }
 
     const requestId = uuid();
     const selectedEntryAction = state.selectedWidgetIndex != null ? state.entryActions[state.selectedWidgetIndex] : null;
@@ -2463,13 +2710,15 @@
       model: state.model,
       message: text,
       fileIds: readyAttachments.map((a) => a.fileId),
-      sourceResultIds: state.sourceResultIds,
       requestId,
     };
+    if (state.replyToMessageId) {
+      payload.replyToMessageId = state.replyToMessageId;
+    }
     // Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n
     // cote backend (voir jobs.py) : jamais confondu avec le provider
-    // ChatGPT/Claude selectionne par ailleurs.
-    if (selectedEntryAction) {
+    // ChatGPT/Claude selectionne par ailleurs. Sans objet en mode "Message".
+    if (selectedEntryAction && !isMessageMode) {
       payload.action = { id: selectedEntryAction.actionId, type: selectedEntryAction.actionId, parameters: {} };
     }
     // Plateformes/API : seuls les identifiants sont transmis (jamais une
@@ -2483,13 +2732,13 @@
       text,
       attachments: state.attachments.slice(),
       widgetIndex: state.selectedWidgetIndex,
-      sourceResultIds: state.sourceResultIds.slice(),
+      replyToMessageId: state.replyToMessageId,
       replyPreviewText: state.replyPreviewText,
     };
     resetComposer();
 
     function showSendError(message) {
-      loadingRow.remove();
+      if (loadingRow) loadingRow.remove();
       const statusRow = el("div", { class: "message-status error" }, [
         el("span", { text: message }),
         el("button", {
@@ -2499,7 +2748,7 @@
             statusRow.remove();
             state.attachments = composerSnapshot.attachments;
             state.selectedWidgetIndex = composerSnapshot.widgetIndex;
-            state.sourceResultIds = composerSnapshot.sourceResultIds;
+            state.replyToMessageId = composerSnapshot.replyToMessageId;
             state.replyPreviewText = composerSnapshot.replyPreviewText;
             dom.composerTextarea.value = composerSnapshot.text;
             renderFileChips();
@@ -2516,7 +2765,9 @@
     // L'etat "en cours" (bouton desactive, entry bloquee) dure jusqu'a la
     // VRAIE reponse du provider (evenement SSE), pas juste jusqu'a la mise
     // en file : un seul clic = un seul workflow, et on empeche toute
-    // nouvelle saisie avant que celui-ci n'ait reellement repondu.
+    // nouvelle saisie avant que celui-ci n'ait reellement repondu. En mode
+    // "Message", il n'y a justement rien a attendre : reactive des la
+    // reponse HTTP (voir plus bas).
     const { ok, data } = await api("/messages", { method: "POST", body: JSON.stringify(payload) });
 
     if (!ok || !data.ok) {
@@ -2533,7 +2784,7 @@
       // l'epoque, rien de nouveau a attendre ici.
       state.sending = false;
       updateSendButtonState();
-      loadingRow.remove();
+      if (loadingRow) loadingRow.remove();
       return;
     }
 
@@ -2547,8 +2798,33 @@
     if (data.userMessage) {
       state.seenMessageIds.add(data.userMessage.id);
       if (data.userMessage.seq) state.lastSeenSeq = Math.max(state.lastSeenSeq, data.userMessage.seq);
+      // Complete le rendu optimiste avec l'id reel (mission "Repondre" §2/§3) :
+      // sans ca, "Repondre" a SON PROPRE message tout juste envoye (ex. le
+      // scenario de test "creer A, creer B, repondre a A" dans la MEME
+      // session) resterait indisponible tant que la conversation n'est pas
+      // rouverte.
+      Object.assign(optimisticUserMessage, data.userMessage);
+      userMessageRow.setAttribute("data-message-id", data.userMessage.id);
+      const bubbleEl = userMessageRow.querySelector(".message-bubble");
+      if (bubbleEl) {
+        if (data.userMessage.replyTo && !bubbleEl.querySelector(".reply-context-bubble")) {
+          const authorEl = bubbleEl.querySelector(".message-author");
+          bubbleEl.insertBefore(renderReplyContextBubble(data.userMessage.replyTo), authorEl ? authorEl.nextSibling : bubbleEl.firstChild);
+        }
+        if (!bubbleEl.querySelector(".message-actions-user")) {
+          bubbleEl.appendChild(renderUserMessageActions(optimisticUserMessage));
+        }
+      }
     }
     loadDiscussions(true);
+
+    if (isMessageMode || !data.queued) {
+      // Mode "Message" : le message est deja enregistre/diffuse, rien
+      // d'autre a attendre (voir workspace_routes.py::send_message_route).
+      state.sending = false;
+      updateSendButtonState();
+      return;
+    }
 
     // Phase 4 : la reponse assistant est traitee en arriere-plan (appel n8n
     // potentiellement long) et arrivera plus tard via SSE, jamais dans cette
@@ -2733,7 +3009,10 @@
     wireAddActionButton();
     wireConnectionsButton();
     wireDictation();
+    wireGoogleDriveOption();
     updateConnectionsBadge();
+    handleGoogleDriveRedirectStatus();
+    refreshGoogleDriveOption();
 
     dom.newProjectBtn.addEventListener("click", () => dom.projectForm.classList.toggle("hidden"));
     dom.projectCancelBtn.addEventListener("click", () => {

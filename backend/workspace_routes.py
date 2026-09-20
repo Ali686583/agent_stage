@@ -27,13 +27,14 @@ import time
 import uuid
 
 import requests
-from flask import Blueprint, Response, jsonify, request, send_file, stream_with_context
+from flask import Blueprint, Response, jsonify, redirect, request, send_file, stream_with_context
 
-from librairies import connections_bank, database, n8n_client, realtime, workflow_bank, workspace
+from librairies import connections_bank, database, google_drive, n8n_client, realtime, workflow_bank, workspace
+from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.jobs import execute_workflow_run, queue
 from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
-from librairies.security import hash_token, sign_file_token
+from librairies.security import generate_token, hash_token, sign_file_token
 
 SESSION_COOKIE_NAME = "agent_stage_session"
 
@@ -57,6 +58,13 @@ ALLOWED_MIME_TYPES = {
 }
 
 ALLOWED_MODELS = {"chatgpt", "claude"}
+# Mode "Message" (mission §4) : jamais un provider IA, un simple message
+# publie dans la discussion. Volontairement distinct de ALLOWED_MODELS (qui
+# ne designe que des providers IA reellement appeles) pour que le sens de
+# chaque ensemble reste evident a la lecture.
+MESSAGE_MODE = "message"
+
+GOOGLE_OAUTH_STATE_COOKIE = "agent_stage_gdrive_oauth_state"
 
 # Allowlist d'actions : le navigateur ne choisit jamais librement un workflow,
 # seuls ces identifiants sont acceptes puis transmis a n8n.
@@ -138,25 +146,37 @@ def _serve_file(file_id: str):
 # simulee ni codee en dur cote frontend.
 # ---------------------------------------------------------------------------
 
+# Bouton integre (voir workflow_bank.ensure_google_drive_action) : n'a pas de
+# compte utilisateur reel a resoudre, jamais affiche comme "inconnu" pour
+# autant (qui laisserait croire a un createur supprime).
+_SYSTEM_CREATOR_NAME = "Application"
+
+
+def _resolve_creator_name(created_by: str | None, creator: dict | None) -> str | None:
+    if created_by == "system":
+        return _SYSTEM_CREATOR_NAME
+    return creator["displayName"] if creator else None
+
+
 def _with_creator_name(action: dict) -> dict:
     creator = database.get_user_by_id(action.get("createdBy"))
-    action["createdByName"] = creator["displayName"] if creator else None
+    action["createdByName"] = _resolve_creator_name(action.get("createdBy"), creator)
     return action
 
 
 def _with_creator_names(actions: list) -> list:
     creators = database.get_users_by_ids([a.get("createdBy") for a in actions])
     for action in actions:
-        creator = creators.get(action.get("createdBy"))
-        action["createdByName"] = creator["displayName"] if creator else None
+        action["createdByName"] = _resolve_creator_name(action.get("createdBy"), creators.get(action.get("createdBy")))
     return actions
 
 
 def _with_entry_action_creator_names(entry_actions: list) -> list:
     creators = database.get_users_by_ids([ea.get("actionCreatedBy") for ea in entry_actions])
     for entry_action in entry_actions:
-        creator = creators.get(entry_action.get("actionCreatedBy"))
-        entry_action["actionCreatedByName"] = creator["displayName"] if creator else None
+        entry_action["actionCreatedByName"] = _resolve_creator_name(
+            entry_action.get("actionCreatedBy"), creators.get(entry_action.get("actionCreatedBy"))
+        )
     return entry_actions
 
 
@@ -308,6 +328,43 @@ def add_conversation_to_project_route(conversation_id):
         return _error(400, "projectId requis.")
     try:
         workspace.add_conversation_to_project(project_id, conversation_id, user["id"])
+    except workspace.InvalidAssociationError as exc:
+        return _error(400, str(exc))
+    except ValueError as exc:
+        return _error(404, str(exc))
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/conversations/<conversation_id>/move-project", methods=["POST"])
+@limiter.limit("20 per minute")
+def move_conversation_project_route(conversation_id):
+    """"Deplacer dans un autre projet [commun]" (mission §6/7) : un seul
+    endpoint pour les deux cas, comme add_conversation_to_project_route ci-
+    dessus -- le type personnel/commun est verifie cote serveur (jamais
+    confie au frontend), voir workspace.move_conversation_to_project.
+
+    Permission (mission §7, "verifie les autorisations cote BACKEND") :
+    etre participant de la discussion deplacee est deja obligatoire (comme
+    pour toute action sur une conversation) ; pour une discussion COMMUNE,
+    is_participant() rejoint automatiquement tout utilisateur authentifie
+    (meme regle que le reste de l'application, voir workspace.is_participant)
+    -- il n'existe pas de permission plus fine sur les projets communs dans
+    cette application (aucune n'est demandee ailleurs), donc aucune n'est
+    inventee ici : un utilisateur SANS acces a la discussion (donc jamais
+    devenu participant) est bloque des ce premier controle, avant meme de
+    savoir si le projet de destination existe."""
+    user, err = _require_user()
+    if err:
+        return err
+    if not workspace.is_participant(conversation_id, user["id"]):
+        return _error(404, "Conversation introuvable.")
+    data = request.get_json(silent=True) or {}
+    from_project_id = str(data.get("fromProjectId", ""))
+    to_project_id = str(data.get("toProjectId", ""))
+    if not from_project_id or not to_project_id:
+        return _error(400, "fromProjectId et toProjectId requis.")
+    try:
+        workspace.move_conversation_to_project(from_project_id, to_project_id, conversation_id, user["id"])
     except workspace.InvalidAssociationError as exc:
         return _error(400, str(exc))
     except ValueError as exc:
@@ -879,6 +936,80 @@ def delete_connection_route(connection_id):
 
 
 # ---------------------------------------------------------------------------
+# Integration Google Drive (bouton "Resume Drive", mission §5) : OAuth
+# personnel par utilisateur (voir librairies/google_drive.py) -- contrairement
+# a la banque de connexions ci-dessus, ce jeton n'est jamais partage.
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/integrations/google-drive/status", methods=["GET"])
+def google_drive_status_route():
+    user, err = _require_user()
+    if err:
+        return err
+    status = google_drive.get_connection_status(user["id"])
+    status["configured"] = google_drive.is_configured()
+    return jsonify(ok=True, **status)
+
+
+@workspace_bp.route("/integrations/google-drive/connect", methods=["GET"])
+@limiter.limit("10 per minute")
+def google_drive_connect_route():
+    user, err = _require_user()
+    if err:
+        return err
+    if not google_drive.is_configured():
+        return _error(503, "Integration Google Drive non configuree.")
+    state = generate_token(16)
+    response = redirect(google_drive.build_authorization_url(state))
+    response.set_cookie(
+        GOOGLE_OAUTH_STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        secure=os.environ.get("COOKIE_SECURE", "true").lower() != "false",
+        samesite="Lax",
+        path="/",
+    )
+    return response
+
+
+@workspace_bp.route("/integrations/google-drive/callback", methods=["GET"])
+def google_drive_callback_route():
+    user, err = _require_user()
+    if err:
+        return err
+    frontend_url = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    redirect_target = f"{frontend_url}/page2.html" if frontend_url else "/page2.html"
+
+    def _redirect_with_status(status: str):
+        response = redirect(f"{redirect_target}?googleDriveStatus={status}")
+        response.delete_cookie(GOOGLE_OAUTH_STATE_COOKIE, path="/")
+        return response
+
+    expected_state = request.cookies.get(GOOGLE_OAUTH_STATE_COOKIE)
+    received_state = request.args.get("state")
+    if not expected_state or not received_state or not hmac.compare_digest(expected_state, received_state):
+        return _redirect_with_status("state_mismatch")
+    code = request.args.get("code")
+    if not code:
+        return _redirect_with_status("denied")
+    try:
+        google_drive.connect_user(user["id"], code)
+    except (GoogleDriveConfigError, GoogleDriveError):
+        return _redirect_with_status("error")
+    return _redirect_with_status("connected")
+
+
+@workspace_bp.route("/integrations/google-drive", methods=["DELETE"])
+def google_drive_disconnect_route():
+    user, err = _require_user()
+    if err:
+        return err
+    google_drive.disconnect_user(user["id"])
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Resultats reutilisables
 # ---------------------------------------------------------------------------
 
@@ -1016,9 +1147,11 @@ def send_message_route():
     source_result_ids = data.get("sourceResultIds") or []
     connection_ids = data.get("connectionIds") or []
     action = data.get("action") or None
+    reply_to_message_id = str(data.get("replyToMessageId") or "") or None
     request_id = str(data.get("requestId") or "")[:100] or str(uuid.uuid4())
+    is_message_mode = model == MESSAGE_MODE
 
-    if model not in ALLOWED_MODELS:
+    if model not in ALLOWED_MODELS and not is_message_mode:
         return _error(400, "Modele invalide.")
     if not message_text and not file_ids:
         return _error(400, "Message vide.")
@@ -1031,13 +1164,19 @@ def send_message_route():
 
     action_id = None
     action_parameters = {}
-    if action:
+    # Mode "Message" (mission §4) : jamais d'IA ni de bouton/workflow, un
+    # bouton/action selectionne par ailleurs dans l'entry est donc ignore ici
+    # plutot que rejete (comportement le moins surprenant si l'utilisateur
+    # change de mode sans reinitialiser sa selection de bouton).
+    if action and not is_message_mode:
         action_id = str(action.get("id", ""))
         # Deux familles d'actions coexistent : l'ancienne liste statique
         # ALLOWED_ACTIONS (jamais reellement branchee, id toujours null cote
         # frontend jusqu'ici) et la nouvelle banque dynamique persistee dans
-        # Postgres-jg_R (Phase 5). On accepte l'une ou l'autre pour ne rien
-        # casser si l'ancienne liste venait a etre utilisee ailleurs.
+        # Postgres-jg_R (Phase 5, qui inclut aussi le bouton integre "Resume
+        # Drive", voir workflow_bank.GOOGLE_DRIVE_ACTION_ID). On accepte l'une
+        # ou l'autre pour ne rien casser si l'ancienne liste venait a etre
+        # utilisee ailleurs.
         if action_id not in ALLOWED_ACTIONS and not workflow_bank.get_action(action_id):
             return _error(400, "Action non autorisee.")
         action_parameters = action.get("parameters") or {}
@@ -1060,6 +1199,20 @@ def send_message_route():
         # (jamais fait confiance a une configuration venue du frontend, §36/44).
         if not connections_bank.get_connection(connection_id):
             return _error(404, "Connexion introuvable.")
+    if reply_to_message_id:
+        # "Repondre" (mission §2/§3) : le message cible doit exister ET
+        # appartenir a une conversation ou l'utilisateur est deja participant
+        # -- jamais une simple existence (meme faille de principe que pour
+        # source_result_ids/result_id ci-dessus), et jamais une conversation
+        # differente de celle ou le nouveau message est envoye.
+        target_message = workspace.get_message(reply_to_message_id)
+        if (
+            not target_message
+            or not conversation_id
+            or target_message["conversationId"] != conversation_id
+            or not workspace.is_participant(conversation_id, user["id"])
+        ):
+            return _error(404, "Message cible introuvable.")
 
     # Idempotence : un meme requestId rejoue (retry reseau, double-clic) ne
     # redeclenche jamais un second workflow ni un second message utilisateur.
@@ -1114,10 +1267,28 @@ def send_message_route():
             content=message_text,
             model=model,
             action_id=action_id,
+            reply_to_message_id=reply_to_message_id,
         )
         if file_ids:
             workspace.link_files_to_message(user_message["id"], file_ids)
         workspace.touch_conversation(conversation_id)
+
+        if is_message_mode:
+            # Mode "Message" (mission §4) : le texte est deja enregistre et
+            # diffuse (message.created, voir workspace.add_message) comme
+            # n'importe quel message -- aucun run, aucune mise en file,
+            # jamais d'appel IA. Il redevient disponible comme contexte pour
+            # ChatGPT/Claude via le prochain message de la conversation
+            # (voir librairies/jobs.py::_build_conversation_history_context).
+            return jsonify(
+                ok=True,
+                conversationId=conversation_id,
+                isNewConversation=is_new_conversation,
+                conversationTitle=conversation["title"],
+                userMessage=user_message,
+                requestId=request_id,
+                queued=False,
+            )
 
         run = workspace.start_workflow_run(conversation_id, user_message["id"], user["id"], model, request_id)
         if run is None:
@@ -1143,6 +1314,7 @@ def send_message_route():
         source_result_ids,
         connection_ids,
         request_id,
+        reply_to_message_id,
         job_timeout=N8N_TIMEOUT_SECONDS + 30,
     )
 

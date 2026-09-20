@@ -86,7 +86,33 @@ def _public_conversation(row: dict) -> dict:
     }
 
 
+def _reply_excerpt(content: str | None, has_attachments: bool, max_length: int = 160) -> str:
+    cleaned = " ".join((content or "").split())
+    if not cleaned:
+        return "[Pièce jointe]" if has_attachments else ""
+    if len(cleaned) <= max_length:
+        return cleaned
+    return cleaned[:max_length].rsplit(" ", 1)[0] + "…"
+
+
 def _public_message(row: dict) -> dict:
+    reply_to_id = row.get("reply_to_message_id")
+    reply_to = None
+    if reply_to_id:
+        # La jointure (voir _MESSAGE_SELECT) ne trouve rien si le message
+        # cible n'existe plus : jamais suppose "aucune reponse" pour autant
+        # (voir mission §13, "message reply original supprime") -- le
+        # frontend doit pouvoir afficher un etat neutre plutot que rien.
+        if row.get("reply_to_author_name") is not None:
+            reply_to = {
+                "id": reply_to_id,
+                "authorName": row.get("reply_to_live_name") or row.get("reply_to_author_name"),
+                "role": row.get("reply_to_role"),
+                "excerpt": _reply_excerpt(row.get("reply_to_content"), bool(row.get("reply_to_has_attachment"))),
+                "unavailable": False,
+            }
+        else:
+            reply_to = {"id": reply_to_id, "unavailable": True}
     return {
         "id": row["id"],
         "conversationId": row["conversation_id"],
@@ -101,6 +127,8 @@ def _public_message(row: dict) -> dict:
         "model": row["model"],
         "actionId": row["action_id"],
         "resultId": row["result_id"],
+        "replyToMessageId": reply_to_id,
+        "replyTo": reply_to,
         "seq": row["seq"],
         "createdAt": row["created_at"].isoformat(),
     }
@@ -368,6 +396,49 @@ def add_conversation_to_project(project_id: str, conversation_id: str, user_id: 
             (project_id, conversation_id, user_id),
         )
         conn.execute("UPDATE projects SET updated_at = now() WHERE id = %s", (project_id,))
+
+
+def move_conversation_to_project(
+    from_project_id: str, to_project_id: str, conversation_id: str, user_id: str
+) -> None:
+    """Deplace (pas duplique) une conversation d'un projet vers un autre :
+    retire l'association a from_project_id et ajoute celle a to_project_id,
+    dans la MEME transaction (jamais un etat intermediaire ou elle
+    n'appartiendrait a aucun des deux si une des deux etapes echouait).
+    Reutilise les memes garde-fous que add_conversation_to_project (types
+    personnel/commun compatibles) : aucune nouvelle regle de permission
+    inventee, cette fonction est un ADD + REMOVE de l'association deja
+    existante, jamais un nouveau mecanisme d'acces."""
+    with _db() as conn:
+        to_project_row = conn.execute(
+            "SELECT is_shared FROM projects WHERE id = %s", (to_project_id,)
+        ).fetchone()
+        if not to_project_row:
+            raise ValueError("Projet de destination introuvable.")
+        conv_row = conn.execute(
+            "SELECT is_shared FROM conversations WHERE id = %s", (conversation_id,)
+        ).fetchone()
+        if not conv_row:
+            raise ValueError("Conversation introuvable.")
+        if to_project_row["is_shared"] != conv_row["is_shared"]:
+            raise InvalidAssociationError(
+                "Le type de discussion (personnelle/commune) ne correspond pas a celui du projet de destination."
+            )
+        if to_project_id == from_project_id:
+            return  # rien a faire : deja dans ce projet
+        conn.execute(
+            "DELETE FROM project_conversations WHERE project_id = %s AND conversation_id = %s",
+            (from_project_id, conversation_id),
+        )
+        conn.execute(
+            """INSERT INTO project_conversations (project_id, conversation_id, added_by_user_id)
+               VALUES (%s, %s, %s) ON CONFLICT DO NOTHING""",
+            (to_project_id, conversation_id, user_id),
+        )
+        conn.execute(
+            "UPDATE projects SET updated_at = now() WHERE id = ANY(%s)",
+            ([from_project_id, to_project_id],),
+        )
 
 
 def list_shared_project_conversations(project_id: str) -> list[dict]:
@@ -639,14 +710,16 @@ def add_message(
     model: str | None = None,
     action_id: str | None = None,
     result_id: str | None = None,
+    reply_to_message_id: str | None = None,
     publish_extra: dict | None = None,
 ) -> dict:
     message_id = new_id("msg")
     with _db() as conn:
         conn.execute(
             """INSERT INTO messages
-               (id, conversation_id, user_id, author_name, role, content, blocks, model, action_id, result_id)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               (id, conversation_id, user_id, author_name, role, content, blocks, model, action_id, result_id,
+                reply_to_message_id)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
                 message_id,
                 conversation_id,
@@ -658,6 +731,7 @@ def add_message(
                 model,
                 action_id,
                 result_id,
+                reply_to_message_id,
             ),
         )
     created = get_message(message_id)
@@ -685,9 +759,14 @@ def publish_workflow_failed(conversation_id: str, request_id: str, message_id: s
 
 
 _MESSAGE_SELECT = """
-    SELECT m.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar
+    SELECT m.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar,
+           rt.author_name AS reply_to_author_name, rt.content AS reply_to_content, rt.role AS reply_to_role,
+           COALESCE(ru.display_name, ru.email) AS reply_to_live_name,
+           EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.message_id = rt.id) AS reply_to_has_attachment
     FROM messages m
     LEFT JOIN users u ON u.id = m.user_id
+    LEFT JOIN messages rt ON rt.id = m.reply_to_message_id
+    LEFT JOIN users ru ON ru.id = rt.user_id
 """
 
 

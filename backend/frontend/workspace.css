@@ -473,6 +473,63 @@ html, body {
 }
 .msg-action-link:hover { color: var(--color-accent-text); text-decoration: underline; }
 
+/* Aperçu persistant "en reponse a" au-dessus d'un message envoye (mission
+   "Repondre" §3) : petite bulle secondaire, angles arrondis, legerement
+   decalee vers la droite par rapport au message principal, compacte,
+   cliquable (remonte jusqu'au message original + highlight temporaire).
+   Coherente Light/Dark Mode via les memes tokens que le reste de l'app. */
+.reply-context-bubble {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 90%;
+  margin: 0 0 6px auto;
+  padding: 5px 10px;
+  border-radius: var(--radius-medium);
+  background: var(--color-accent-soft-bg);
+  border: 1px solid var(--color-border);
+  border-inline-start: 3px solid var(--color-accent);
+  font-size: 0.76rem;
+  cursor: pointer;
+}
+.message-row.user .reply-context-bubble { margin-inline-end: 4px; }
+.reply-context-bubble:hover { background: var(--color-border-light); }
+.reply-context-bubble:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 1px; }
+.reply-context-bubble.unavailable { cursor: default; border-inline-start-color: var(--color-muted); font-style: italic; }
+.reply-context-bubble.unavailable:hover { background: var(--color-accent-soft-bg); }
+.reply-context-author { font-weight: 600; color: var(--color-accent-text); flex-shrink: 0; }
+.reply-context-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-muted);
+}
+
+/* Highlight temporaire du message original vise par un clic sur une bulle
+   "en reponse a" (mission §3) : tres leger, disparait automatiquement. */
+.message-row-highlight .message-bubble {
+  animation: workspace-reply-highlight 1.6s ease-out;
+}
+@keyframes workspace-reply-highlight {
+  0% { box-shadow: 0 0 0 2px var(--color-accent); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .message-row-highlight .message-bubble { animation: none; outline: 2px solid var(--color-accent); }
+}
+
+/* "Repondre" sur un message UTILISATEUR (mission contexte+reply §2) : version
+   allegee de .message-actions (pas de separateur/Copier/PDF), un seul lien
+   discret aligne comme le reste de la bulle utilisateur. */
+.message-actions-user {
+  justify-content: flex-end;
+  margin-top: 4px;
+  padding-top: 0;
+  border-top: 0;
+}
+.message-row.user .message-actions-user .msg-action-link { color: var(--text-on-brand-green); opacity: 0.75; }
+.message-row.user .message-actions-user .msg-action-link:hover { opacity: 1; text-decoration: underline; }
+
 /* Bandeau "Repondre a :" au-dessus de l'entry (mission §5) : indicateur
    visuel clair qu'une reponse precise est ciblee, annulable a tout moment. */
 .reply-preview {
@@ -774,6 +831,12 @@ html, body {
   font-size: 0.82rem;
 }
 .model-selector button.active { background: var(--color-accent-soft-bg); color: var(--color-accent-text); }
+/* Mode "Message" (mission §4) : toujours teinte du meme vert que le logo
+   (--brand-green, voir theme.css), meme au repos -- pas seulement a l'etat
+   actif comme ChatGPT/Claude -- pour bien le distinguer visuellement des
+   deux providers IA. */
+.model-selector button[data-model="message"] { color: var(--brand-green-text); }
+.model-selector button[data-model="message"].active { background: var(--brand-green-soft-bg); }
 
 .file-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .file-chip {
@@ -908,6 +971,11 @@ html, body {
 /* Claude : fond orange dans les deux themes, fleche sombre pour un
    contraste net sur cet orange precis. */
 .send-btn.model-claude { background: var(--model-claude-color); color: #1a1a1a; }
+
+/* Message (mission §4) : le MEME vert que le logo (--brand-green), dans les
+   deux themes -- jamais un provider IA, donc jamais confondu visuellement
+   avec ChatGPT/Claude. */
+.send-btn.model-message { background: var(--brand-green); color: var(--text-on-brand-green); }
 
 /* Widgets d'actions : de vrais boutons independants, jamais un menu
    deroulant. Structure prete pour label/icon/action.id/type/parameters

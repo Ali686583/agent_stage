@@ -65,6 +65,13 @@ app.register_blueprint(workspace_bp)
 database.init_db()
 workflow_bank.init_bank_db()
 connections_bank.init_connections_db()
+try:
+    # Bouton integre "Resume Drive" (mission Google Drive §5) : idempotent,
+    # ne doit jamais empecher le demarrage si la banque de boutons n'est pas
+    # configuree sur cet environnement (meme garde que le reste de ce fichier).
+    workflow_bank.ensure_google_drive_action()
+except RuntimeError:
+    pass
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,13 @@ from psycopg.types.json import Jsonb
 
 BANK_DATABASE_URL = os.environ.get("WORKFLOW_BANK_DATABASE_URL", "")
 
+# Identifiant FIXE (pas un uuid genere) : cette action integree est reconnue
+# explicitement par librairies/jobs.py (traitement special Google Drive,
+# jamais route vers un webhook n8n comme les autres boutons de la banque -
+# voir ensure_google_drive_action ci-dessous et execute_workflow_run).
+GOOGLE_DRIVE_ACTION_ID = "builtin-google-drive-summary"
+_SYSTEM_CREATED_BY = "system"
+
 
 @contextmanager
 def _db():
@@ -285,6 +292,42 @@ def create_action(
             ),
         ).fetchone()
         return _public_action(row)
+
+
+def ensure_action_with_id(action_id: str, name: str, description: str | None = None) -> dict:
+    """Cree une action a un id FIXE si elle n'existe pas deja (idempotent -
+    appele a chaque demarrage, voir ensure_google_drive_action). Contrairement
+    a create_action, workflow_record_id reste NULL : cette action n'a pas de
+    workflow n8n (voir la note d'architecture dans le module jobs.py qui la
+    traite specialement), et la colonne le permet deja (pas de NOT NULL)."""
+    with _db() as conn:
+        existing = conn.execute("SELECT * FROM actions WHERE id = %s;", (action_id,)).fetchone()
+        if existing:
+            return _public_action(existing)
+        row = conn.execute(
+            """
+            INSERT INTO actions (id, name, workflow_record_id, created_by, description)
+            VALUES (%s, %s, NULL, %s, %s)
+            RETURNING *;
+            """,
+            (action_id, name, _SYSTEM_CREATED_BY, description),
+        ).fetchone()
+        return _public_action(row)
+
+
+def ensure_google_drive_action() -> dict:
+    """Enregistre (une seule fois, idempotent) le bouton integre "Resume
+    Drive" dans la banque de boutons partagee, et le rend immediatement
+    disponible sous l'entry (comme n'importe quel autre bouton de la
+    banque -- mission §5 : "disponible dans la banque de boutons"). Appelee
+    au demarrage du serveur (voir server.py)."""
+    action = ensure_action_with_id(
+        GOOGLE_DRIVE_ACTION_ID,
+        name="Résumé Drive",
+        description="Résume un document Google Drive (collez son lien ou son identifiant dans votre demande).",
+    )
+    add_entry_action(context_id="shared", action_id=GOOGLE_DRIVE_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
+    return action
 
 
 def get_action(action_id: str) -> dict | None:

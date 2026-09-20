@@ -230,6 +230,20 @@ def _create_core_tables(conn) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_seq ON messages (conversation_id, seq);"
         )
+        # Migration additive (mission "contexte + Repondre") : message auquel
+        # celui-ci repond explicitement. Meme convention que action_id/result_id
+        # ci-dessus (simple colonne TEXT, jamais de contrainte FK) : un message
+        # n'est jamais supprime individuellement dans cette application (seule
+        # une conversation entiere peut l'etre, et alors tous ses messages,
+        # dont celui-ci, partent ensemble via ON DELETE CASCADE), donc aucune
+        # contrainte n'est necessaire pour rester coherent -- et l'absence de
+        # FK permet de distinguer proprement, a la lecture (voir _public_message),
+        # "jamais une reponse" de "reponse a un message desormais introuvable"
+        # si ce mecanisme evolue plus tard.
+        conn.execute("ALTER TABLE messages ADD COLUMN IF NOT EXISTS reply_to_message_id TEXT;")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to_message_id);"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS files (
@@ -310,6 +324,26 @@ def _create_core_tables(conn) -> None:
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_files_uploader ON files (uploaded_by_user_id);"
+        )
+
+        # -- Integration Google Drive (bouton "Resume Drive") ----------------
+        # Table additive, dans la base PRINCIPALE (pas Postgres-jg_R) : a la
+        # difference des banques de boutons/connexions (partagees entre tous
+        # les utilisateurs), un acces OAuth Google Drive est strictement
+        # personnel a chaque utilisateur (comme sessions/avatar), jamais
+        # partageable. Le refresh_token est chiffre (voir librairies/
+        # crypto_secrets.py, deja utilise pour les clefs API de la banque de
+        # connexions) : jamais stocke en clair.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS google_drive_credentials (
+                user_id                 TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                refresh_token_encrypted TEXT NOT NULL,
+                google_email            TEXT,
+                created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
         )
 
 
@@ -646,3 +680,41 @@ def invalidate_reset_tokens_for_user(user_id: str) -> None:
                WHERE user_id = %s AND used_at IS NULL""",
             (user_id,),
         )
+
+
+# ---------------------------------------------------------------------------
+# Google Drive (bouton "Resume Drive") : jeton personnel par utilisateur,
+# jamais partage (voir librairies/google_drive.py pour l'usage OAuth reel).
+# ---------------------------------------------------------------------------
+
+def set_google_drive_credential(user_id: str, refresh_token_encrypted: str, google_email: str | None) -> None:
+    with _db() as conn:
+        conn.execute(
+            """INSERT INTO google_drive_credentials (user_id, refresh_token_encrypted, google_email)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (user_id) DO UPDATE
+                   SET refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+                       google_email = EXCLUDED.google_email,
+                       updated_at = now()""",
+            (user_id, refresh_token_encrypted, google_email),
+        )
+
+
+def get_google_drive_credential(user_id: str) -> dict | None:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM google_drive_credentials WHERE user_id = %s", (user_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "userId": row["user_id"],
+        "refreshTokenEncrypted": row["refresh_token_encrypted"],
+        "googleEmail": row["google_email"],
+    }
+
+
+def delete_google_drive_credential(user_id: str) -> bool:
+    with _db() as conn:
+        cur = conn.execute("DELETE FROM google_drive_credentials WHERE user_id = %s", (user_id,))
+    return cur.rowcount > 0
