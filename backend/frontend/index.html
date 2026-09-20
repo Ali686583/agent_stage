@@ -15,7 +15,12 @@
     html, body {
       width: 100%;
       height: 100%;
-      background: var(--color-bg);
+      /* Fond TOUJOURS blanc ici, meme en Dark Mode (demande explicite) :
+         le logo termine sur un fondu vers le blanc (voir le script
+         ci-dessous), donc un fond sombre casserait cet effet. theme.js
+         reste charge pour que data-theme soit deja pose a l'arrivee sur
+         login.html/page2.html, mais n'affecte jamais CETTE page. */
+      background: #ffffff;
       overflow: hidden;
     }
 

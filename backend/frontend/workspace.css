@@ -356,20 +356,11 @@ html, body {
   overflow: hidden;
 }
 .central-column.is-empty { justify-content: center; }
-/* Animation initiale (typewriter "Quelle est votre demande...") : fond
-   TOUJOURS blanc, y compris en Dark Mode -- demande explicite, jamais
-   applique ailleurs dans l'application. Des que l'ecran quitte l'etat
-   "is-empty" (envoi d'un message, ouverture d'une discussion), la classe
-   disparait et le theme normal reprend sans aucun code supplementaire. */
-:root[data-theme="dark"] .central-column.is-empty {
-  background: #ffffff;
-}
-:root[data-theme="dark"] .central-column.is-empty .initial-greeting,
-:root[data-theme="dark"] .central-column.is-empty .initial-question,
-:root[data-theme="dark"] .central-column.is-empty .typewriter-cursor {
-  color: #1a1a1a;
-  background: transparent;
-}
+/* NOTE : l'ecran "Quelle est votre demande...", meme avant le premier
+   message, fait partie de l'application (page2.html) et suit donc
+   normalement le Light/Dark Mode -- pas de fond force ici. La vraie
+   "animation initiale" a fond toujours blanc est l'ecran d'intro
+   (index.html, logo anime), traite separement dans ce fichier. */
 
 .conversation-area {
   overflow-y: auto;
