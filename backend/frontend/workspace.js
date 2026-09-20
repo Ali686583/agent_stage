@@ -1280,6 +1280,12 @@
         google_drive_unsupported_file_type: "workspace.google_drive_unsupported_file_type",
         google_drive_empty_document: "workspace.google_drive_empty_document",
         google_drive_drive_api_error: "workspace.google_drive_api_error",
+        // Boutons "Veille Web" (sans API / Tavily) : memes principes que
+        // Google Drive ci-dessus.
+        web_search_not_configured: "workspace.error_not_configured",
+        web_search_empty_query: "workspace.web_search_empty_query",
+        web_search_no_results: "workspace.web_search_no_results",
+        web_search_network_error: "workspace.web_search_network_error",
       };
       pending.showSendError(t(statusMap[data.error] || "workspace.error_generic"));
     });

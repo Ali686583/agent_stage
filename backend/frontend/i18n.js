@@ -181,6 +181,9 @@
       "workspace.google_drive_unsupported_file_type": "Ce type de document n'est pas pris en charge.",
       "workspace.google_drive_empty_document": "Ce document est vide.",
       "workspace.google_drive_api_error": "Erreur Google Drive. Réessayez plus tard.",
+      "workspace.web_search_empty_query": "Écris ce que tu veux rechercher.",
+      "workspace.web_search_no_results": "Aucun résultat public trouvé pour cette recherche.",
+      "workspace.web_search_network_error": "Erreur réseau pendant la recherche. Réessayez plus tard.",
     },
     en: {
       "theme.toggle": "Dark mode",
@@ -355,6 +358,9 @@
       "workspace.google_drive_unsupported_file_type": "This document type is not supported.",
       "workspace.google_drive_empty_document": "This document is empty.",
       "workspace.google_drive_api_error": "Google Drive error. Please try again later.",
+      "workspace.web_search_empty_query": "Write what you want to search for.",
+      "workspace.web_search_no_results": "No public results found for this search.",
+      "workspace.web_search_network_error": "Network error during the search. Please try again later.",
     },
     ar: {
       "theme.toggle": "الوضع الداكن",
@@ -529,6 +535,9 @@
       "workspace.google_drive_unsupported_file_type": "نوع هذا المستند غير مدعوم.",
       "workspace.google_drive_empty_document": "هذا المستند فارغ.",
       "workspace.google_drive_api_error": "خطأ في Google Drive. حاول مرة أخرى لاحقًا.",
+      "workspace.web_search_empty_query": "اكتب ما تريد البحث عنه.",
+      "workspace.web_search_no_results": "لم يتم العثور على نتائج عامة لهذا البحث.",
+      "workspace.web_search_network_error": "خطأ في الشبكة أثناء البحث. حاول مرة أخرى لاحقًا.",
     },
   };
 

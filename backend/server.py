@@ -72,6 +72,12 @@ try:
     workflow_bank.ensure_google_drive_action()
 except RuntimeError:
     pass
+try:
+    # Boutons integres "Veille Web (sans API)" / "Veille Web (Tavily)" :
+    # meme principe, meme garde.
+    workflow_bank.ensure_web_monitoring_actions()
+except RuntimeError:
+    pass
 
 
 # ---------------------------------------------------------------------------

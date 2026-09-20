@@ -26,9 +26,10 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import connections_bank, google_drive, platform_client, workflow_bank, workspace
+from librairies import connections_bank, google_drive, platform_client, web_search, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.security import sign_file_token
+from librairies.web_search import WebSearchError
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
 if not REDIS_URL:
@@ -223,6 +224,17 @@ def _fetch_google_drive_document(user_id: str, message_text: str) -> str:
     return google_drive.fetch_document_text(access_token, file_id)
 
 
+def _build_web_monitoring_prompt(user_query: str, results_text: str) -> str:
+    return (
+        "Voici des resultats REELS de recherche sur des sources publiques pour "
+        "la demande ci-dessous (titres, extraits, liens). N'invente aucune "
+        "information au-dela de ce qui est fourni ici, et indique clairement si "
+        "ces resultats sont insuffisants pour repondre completement.\n\n"
+        f"--- RESULTATS DE RECHERCHE ---\n{results_text}\n--- FIN DES RESULTATS ---\n\n"
+        f"Demande de l'utilisateur : {user_query}"
+    )
+
+
 def _build_drive_summary_prompt(user_instruction: str, document_text: str) -> str:
     instruction = (user_instruction or "").strip()
     extra = f"\n\nConsigne complementaire de l'utilisateur : {instruction}" if instruction else ""
@@ -251,6 +263,7 @@ def execute_workflow_run(
     reply_to_message_id: str | None = None,
 ) -> None:
     drive_document_text = None
+    web_search_results_text = None
     # Bouton integre "Resume Drive" (mission §5) : jamais route vers un
     # webhook n8n comme les autres boutons de la banque (il n'en a pas, voir
     # workflow_bank.ensure_google_drive_action) -- le contenu Drive, une fois
@@ -270,6 +283,24 @@ def execute_workflow_run(
             return
         except GoogleDriveError as exc:
             _fail(run_id, conversation_id, user_message_id, request_id, "failed", f"google_drive_{exc}")
+            return
+    # Boutons integres "Veille Web (sans API)" / "Veille Web (Tavily)" : meme
+    # principe que Resume Drive ci-dessus -- recherche reelle cote serveur
+    # sur des sources PUBLIQUES uniquement, jamais de donnee personnelle,
+    # jamais un resultat invente (voir librairies/web_search.py).
+    elif action_id in (workflow_bank.WEB_MONITORING_FREE_ACTION_ID, workflow_bank.WEB_MONITORING_TAVILY_ACTION_ID):
+        webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
+        if not webhook_url:
+            _fail(run_id, conversation_id, user_message_id, request_id, "failed", "workflow_not_configured")
+            return
+        try:
+            if action_id == workflow_bank.WEB_MONITORING_FREE_ACTION_ID:
+                results = web_search.search_public_news_rss(message_text)
+            else:
+                results = web_search.search_public_web_tavily(message_text)
+            web_search_results_text = web_search.format_results_for_prompt(results)
+        except WebSearchError as exc:
+            _fail(run_id, conversation_id, user_message_id, request_id, "failed", f"web_search_{exc}")
             return
     # Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n,
     # jamais celui du provider ChatGPT/Claude : les deux systemes ne doivent
@@ -360,6 +391,8 @@ def execute_workflow_run(
 
     if drive_document_text is not None:
         prompt_text = _build_drive_summary_prompt(message_text, drive_document_text)
+    elif web_search_results_text is not None:
+        prompt_text = _build_web_monitoring_prompt(message_text, web_search_results_text)
     else:
         prompt_text = _build_prompt_with_context(
             conversation_id, user_message_id, message_text, source_result_ids, reply_to_message_id

@@ -36,6 +36,11 @@ BANK_DATABASE_URL = os.environ.get("WORKFLOW_BANK_DATABASE_URL", "")
 # jamais route vers un webhook n8n comme les autres boutons de la banque -
 # voir ensure_google_drive_action ci-dessous et execute_workflow_run).
 GOOGLE_DRIVE_ACTION_ID = "builtin-google-drive-summary"
+# Veille web par mots-cles (mission "Veille Web") : deux boutons distincts,
+# meme raison que pour Google Drive (id fixe reconnu par librairies/jobs.py,
+# jamais route vers un webhook n8n).
+WEB_MONITORING_FREE_ACTION_ID = "builtin-web-monitoring-free"
+WEB_MONITORING_TAVILY_ACTION_ID = "builtin-web-monitoring-tavily"
 _SYSTEM_CREATED_BY = "system"
 
 
@@ -328,6 +333,32 @@ def ensure_google_drive_action() -> dict:
     )
     add_entry_action(context_id="shared", action_id=GOOGLE_DRIVE_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
     return action
+
+
+def ensure_web_monitoring_actions() -> None:
+    """Enregistre (une seule fois, idempotent) les deux boutons integres de
+    veille web par mots-cles -- label "(sans API)" pour distinguer clairement
+    celui qui ne necessite aucune configuration de celui qui utilise Tavily
+    (cle API requise, voir librairies/web_search.py)."""
+    ensure_action_with_id(
+        WEB_MONITORING_FREE_ACTION_ID,
+        name="Veille Web (sans API)",
+        description=(
+            "Recherche des articles publics recents par mots-cles via le flux RSS "
+            "public de Google Actualites. Aucune cle API requise."
+        ),
+    )
+    add_entry_action(context_id="shared", action_id=WEB_MONITORING_FREE_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
+
+    ensure_action_with_id(
+        WEB_MONITORING_TAVILY_ACTION_ID,
+        name="Veille Web (Tavily)",
+        description=(
+            "Recherche du web public par mots-cles via l'API Tavily. "
+            "Necessite la variable d'environnement TAVILY_API_KEY sur le serveur."
+        ),
+    )
+    add_entry_action(context_id="shared", action_id=WEB_MONITORING_TAVILY_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
 
 
 def get_action(action_id: str) -> dict | None:
