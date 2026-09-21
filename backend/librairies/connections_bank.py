@@ -23,16 +23,29 @@ get_oauth_tokens() (OAuth) ne la dechiffre. Toute fonction qui peut etre
 appelee (directement ou indirectement) depuis une route HTTP renvoie
 uniquement _public_connection(), qui ne contient jamais de secret en clair.
 
-DEUX ENTREES INDEPENDANTES ET FACULTATIVES (chacune peut etre vide, remplie,
-ou les deux a la fois) : une connexion "toutes plateformes" doit couvrir
-aussi bien une API a cle simple (Bearer/en-tete personnalise/parametre
-d'URL) qu'une plateforme exigeant OAuth2 (l'utilisateur fournit alors sa
-propre app OAuth -- client_id/secret + URLs d'autorisation/de jeton --
-obtenue sur la console developpeur de la plateforme visee, voir
-librairies/oauth_connector.py qui gere le flux reel). Contrairement a
+TROIS ENTREES INDEPENDANTES ET FACULTATIVES (chacune peut etre vide, remplie,
+ou combinee avec les autres) : une connexion "toutes plateformes" doit
+couvrir une API a cle simple (entree 1 : Bearer/en-tete personnalise/
+parametre d'URL), une plateforme exigeant OAuth2 (entree 2 : l'utilisateur
+fournit sa propre app OAuth -- client_id/secret + URLs d'autorisation/de
+jeton -- obtenue sur la console developpeur de la plateforme visee, voir
+librairies/oauth_connector.py qui gere le flux reel), et un serveur MCP
+(entree 3 : URL + authentification facultative). Contrairement a
 librairies/google_drive.py (jeton personnel par UTILISATEUR), un jeton
 OAuth ici est stocke au niveau de la CONNEXION et partage par tout l'espace
 collaboratif, coherent avec le reste de cette banque.
+
+ENTREE 3 (serveur MCP) -- DIFFERENCE D'ARCHITECTURE IMPORTANTE avec les
+entrees 1/2 : pour une cle API ou un jeton OAuth, c'est CE backend qui
+appelle la plateforme externe (voir librairies/platform_client.py et
+librairies/oauth_connector.py) et ne transmet a n8n QUE le resultat deja
+recupere. Un serveur MCP, lui, est appele DIRECTEMENT par n8n (bloc "AI
+Agent" + "MCP Client", qui decident eux-memes, pendant la generation de la
+reponse, quel outil appeler) -- ce backend ne fait jamais cet appel
+lui-meme. Consequence assumee et documentee : le secret MCP (s'il y en a
+un) est donc dechiffre puis transmis a n8n dans la charge utile de chaque
+requete (voir get_mcp_config_with_secret ci-dessous et librairies/jobs.py),
+jamais journalise, jamais renvoye via une route HTTP.
 """
 
 from __future__ import annotations
@@ -54,6 +67,19 @@ MAX_KEYWORDS = 15
 MAX_KEYWORD_LENGTH = 40
 
 AUTH_LOCATIONS = ("header_bearer", "header_custom", "query_param")
+# Entree 3 (serveur MCP) : options plus restreintes que AUTH_LOCATIONS car
+# c'est n8n (pas ce backend) qui authentifie l'appel -- "none" est une
+# option a part entiere ici (beaucoup de serveurs MCP de test/internes n'en
+# ont pas besoin), et "query_param" n'a pas de sens pour un serveur MCP.
+MCP_AUTH_LOCATIONS = ("none", "header_bearer", "header_custom")
+# Seul le transport SSE est verifie fonctionnel sur l'instance n8n de ce
+# projet (le noeud MCP Client de la version installee n'expose qu'un champ
+# "sseEndpoint", confirme en testant reellement -- voir le rapport fourni a
+# l'utilisateur). Champ conserve pour permettre une evolution future sans
+# migration si n8n ajoute un jour un autre transport, mais une seule valeur
+# est acceptee pour l'instant : ne jamais laisser croire qu'un autre
+# transport est pris en charge alors qu'il ne l'est pas.
+MCP_TRANSPORTS = ("sse",)
 
 
 @contextmanager
@@ -114,6 +140,10 @@ def _create_tables(conn) -> None:
     # de secret_encrypted (cle API de la 1re entree), voir le docstring du
     # module.
     conn.execute("ALTER TABLE connections ADD COLUMN IF NOT EXISTS oauth_client_secret_encrypted TEXT;")
+    # Secret de la 3e entree possible (authentification du serveur MCP,
+    # entree 3) : independant des deux precedents, voir le docstring du
+    # module.
+    conn.execute("ALTER TABLE connections ADD COLUMN IF NOT EXISTS mcp_secret_encrypted TEXT;")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS connection_oauth_tokens (
@@ -151,6 +181,12 @@ def _public_connection(row) -> dict:
         # deja connectee (jeton obtenu) sont deux etats distincts.
         "hasOAuthConfig": has_oauth_config,
         "oauthConnected": bool(row.get("oauth_connected")),
+        # Entree 3 (serveur MCP) : voir le docstring du module -- appelee
+        # directement par n8n, jamais par ce backend.
+        "hasMcpConfig": bool(config.get("mcpServerUrl")),
+        "mcpTransport": config.get("mcpTransport") or "sse",
+        "mcpAuthLocation": config.get("mcpAuthLocation") or "none",
+        "mcpAuthFieldName": config.get("mcpAuthFieldName") or "",
         "createdBy": row["created_by"],
         "connected": True,
         "createdAt": row["created_at"].isoformat(),
@@ -183,8 +219,9 @@ def _clean_keywords(keywords) -> list[str]:
 def _clean_config(config: dict | None) -> dict:
     """N'accepte que des cles connues (jamais une configuration arbitraire
     fournie par le frontend) : voir librairies/platform_client.py (entree 1,
-    cle API) et librairies/oauth_connector.py (entree 2, OAuth) pour leur
-    usage."""
+    cle API), librairies/oauth_connector.py (entree 2, OAuth) et
+    librairies/jobs.py (entree 3, MCP -- transmise telle quelle a n8n) pour
+    leur usage."""
     config = config or {}
     cleaned: dict = {}
     base_url = str(config.get("baseUrl") or "").strip()[:500]
@@ -208,6 +245,17 @@ def _clean_config(config: dict | None) -> dict:
     oauth_scope = str(config.get("oauthScope") or "").strip()[:300]
     if oauth_scope:
         cleaned["oauthScope"] = oauth_scope
+
+    mcp_server_url = str(config.get("mcpServerUrl") or "").strip()[:500]
+    if mcp_server_url.startswith("http://") or mcp_server_url.startswith("https://"):
+        cleaned["mcpServerUrl"] = mcp_server_url
+    mcp_transport = str(config.get("mcpTransport") or "").strip()
+    cleaned["mcpTransport"] = mcp_transport if mcp_transport in MCP_TRANSPORTS else "sse"
+    mcp_auth_location = str(config.get("mcpAuthLocation") or "").strip()
+    cleaned["mcpAuthLocation"] = mcp_auth_location if mcp_auth_location in MCP_AUTH_LOCATIONS else "none"
+    mcp_auth_field_name = str(config.get("mcpAuthFieldName") or "").strip()[:100]
+    if mcp_auth_field_name:
+        cleaned["mcpAuthFieldName"] = mcp_auth_field_name
     return cleaned
 
 
@@ -231,23 +279,25 @@ def create_connection(
     platform_type: str = "",
     api_key: str = "",
     oauth_client_secret: str = "",
+    mcp_secret: str = "",
     config: dict | None = None,
 ) -> dict:
-    """Les deux entrees (cle API / OAuth) sont facultatives et independantes
-    (voir le docstring du module) : api_key et oauth_client_secret peuvent
-    chacune etre vides, remplies, ou les deux a la fois. Jamais appele
-    encrypt_secret() sur une valeur vide (voir crypto_secrets.py)."""
+    """Les trois entrees (cle API / OAuth / MCP) sont facultatives et
+    independantes (voir le docstring du module) : api_key, oauth_client_secret
+    et mcp_secret peuvent chacune etre vides, remplies, ou combinees. Jamais
+    appele encrypt_secret() sur une valeur vide (voir crypto_secrets.py)."""
     connection_id = str(uuid.uuid4())
     secret_encrypted = encrypt_secret(api_key) if api_key else None
     oauth_client_secret_encrypted = encrypt_secret(oauth_client_secret) if oauth_client_secret else None
+    mcp_secret_encrypted = encrypt_secret(mcp_secret) if mcp_secret else None
     with _db() as conn:
         row = conn.execute(
             """
             INSERT INTO connections (
                 id, name, platform_type, keywords, config,
-                secret_encrypted, oauth_client_secret_encrypted, created_by
+                secret_encrypted, oauth_client_secret_encrypted, mcp_secret_encrypted, created_by
             )
-            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)
             RETURNING *;
             """,
             (
@@ -258,6 +308,7 @@ def create_connection(
                 Jsonb(_clean_config(config)),
                 secret_encrypted,
                 oauth_client_secret_encrypted,
+                mcp_secret_encrypted,
                 created_by,
             ),
         ).fetchone()
@@ -385,6 +436,40 @@ def clear_oauth_tokens(connection_id: str) -> bool:
     with _db() as conn:
         cursor = conn.execute("DELETE FROM connection_oauth_tokens WHERE connection_id = %s;", (connection_id,))
         return cursor.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Entree 3 (serveur MCP) : contrairement aux entrees 1/2, aucun appel HTTP
+# n'est fait depuis ce backend -- voir librairies/jobs.py, qui transmet
+# cette configuration (secret dechiffre inclus) a n8n, qui appelle lui-meme
+# le serveur MCP via son bloc "AI Agent" + "MCP Client".
+# ---------------------------------------------------------------------------
+
+def get_mcp_config_with_secret(connection_id: str) -> dict | None:
+    """Usage strictement interne (librairies/jobs.py) : renvoie la
+    configuration MCP dechiffree de cette connexion, ou None si la connexion
+    n'existe pas OU si l'entree 3 n'a pas ete renseignee (URL manquante).
+    L'authentification est facultative (beaucoup de serveurs MCP internes/de
+    test n'en ont pas besoin) : `secret` est une chaine vide dans ce cas,
+    jamais une valeur inventee."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM connections WHERE id = %s AND status = 'active';", (connection_id,)
+        ).fetchone()
+    if not row:
+        return None
+    config = row["config"] or {}
+    server_url = config.get("mcpServerUrl")
+    if not server_url:
+        return None
+    return {
+        "name": row["name"],
+        "serverUrl": server_url,
+        "transport": config.get("mcpTransport") or "sse",
+        "authLocation": config.get("mcpAuthLocation") or "none",
+        "authFieldName": config.get("mcpAuthFieldName") or "",
+        "secret": decrypt_secret(row["mcp_secret_encrypted"]) if row["mcp_secret_encrypted"] else "",
+    }
 
 
 def rename_connection(connection_id: str, name: str, actor_user_id: str, is_admin: bool) -> dict | None:

@@ -2575,10 +2575,11 @@
     menu.innerHTML = "";
     menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_connection") }));
 
-    // Seul le nom est obligatoire. Les DEUX entrees ci-dessous (cle API
-    // generalisee / OAuth generique -- voir librairies/connections_bank.py)
-    // sont affichees directement, facultatives et independantes : on peut
-    // remplir l'une, l'autre, les deux, ou aucune.
+    // Seul le nom est obligatoire. Les TROIS entrees ci-dessous (cle API
+    // generalisee / OAuth generique / serveur MCP -- voir
+    // librairies/connections_bank.py) sont affichees directement,
+    // facultatives et independantes : on peut remplir n'importe laquelle,
+    // plusieurs, ou aucune.
     const nameInput = el("input", { type: "text", placeholder: t("workspace.connection_name_placeholder") });
     const keywordsInput = el("input", { type: "text", placeholder: t("workspace.connection_keywords_placeholder") });
 
@@ -2603,6 +2604,21 @@
     const oauthTokenUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_token_url_placeholder") });
     const oauthScopeInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_scope_placeholder") });
 
+    const mcpServerUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_mcp_url_placeholder") });
+    const mcpAuthLocationSelect = el("select", { class: "connections-select" }, [
+      el("option", { value: "none", text: t("workspace.connection_mcp_auth_none") }),
+      el("option", { value: "header_bearer", text: t("workspace.connection_auth_bearer") }),
+      el("option", { value: "header_custom", text: t("workspace.connection_auth_header") }),
+    ]);
+    const mcpAuthFieldNameInput = el("input", { type: "text", placeholder: t("workspace.connection_auth_field_placeholder") });
+    const mcpAuthFieldNameWrap = el("div", { class: "project-create-form hidden" }, [mcpAuthFieldNameInput]);
+    const mcpAuthTokenInput = el("input", { type: "password", placeholder: t("workspace.connection_mcp_token_placeholder") });
+    mcpAuthLocationSelect.addEventListener("change", (event) => {
+      event.stopPropagation();
+      mcpAuthFieldNameWrap.classList.toggle("hidden", mcpAuthLocationSelect.value !== "header_custom");
+    });
+    mcpAuthLocationSelect.addEventListener("click", (event) => event.stopPropagation());
+
     const form = el("div", { class: "project-create-form" }, [
       nameInput,
       keywordsInput,
@@ -2617,6 +2633,11 @@
       oauthAuthorizeUrlInput,
       oauthTokenUrlInput,
       oauthScopeInput,
+      el("div", { class: "connections-entry-label", text: t("workspace.connection_entry_mcp") }),
+      mcpServerUrlInput,
+      mcpAuthLocationSelect,
+      mcpAuthFieldNameWrap,
+      mcpAuthTokenInput,
       el("div", { class: "project-create-actions" }, [
         el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
         el("button", {
@@ -2654,6 +2675,12 @@
                   authorizeUrl: oauthAuthorizeUrlInput.value.trim(),
                   tokenUrl: oauthTokenUrlInput.value.trim(),
                   scope: oauthScopeInput.value.trim(),
+                },
+                mcpEntry: {
+                  serverUrl: mcpServerUrlInput.value.trim(),
+                  authLocation: mcpAuthLocationSelect.value,
+                  authFieldName: mcpAuthFieldNameInput.value.trim(),
+                  authToken: mcpAuthTokenInput.value.trim(),
                 },
               }),
             });

@@ -29,7 +29,7 @@ import uuid
 import requests
 from flask import Blueprint, Response, jsonify, redirect, request, send_file, stream_with_context
 
-from librairies import connections_bank, database, google_drive, n8n_client, oauth_connector, realtime, workflow_bank, workspace
+from librairies import connections_bank, database, google_drive, mcp_stub_server, n8n_client, oauth_connector, realtime, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.oauth_connector import OAuthConnectorConfigError, OAuthConnectorError
 from librairies.jobs import execute_workflow_run, queue
@@ -571,6 +571,52 @@ def events_route():
     return response
 
 
+# ---------------------------------------------------------------------------
+# Serveur MCP "vide" (voir librairies/mcp_stub_server.py) : appele
+# DIRECTEMENT par n8n (jamais par le navigateur), jamais authentifie par
+# session -- meme principe que /files/<id>/signed ci-dessus, un appelant
+# serveur-a-serveur n'a pas de cookie de session. Comble les emplacements
+# "serveur MCP" non utilises d'une requete (voir librairies/jobs.py).
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/mcp/stub", methods=["GET"])
+def mcp_stub_sse_route():
+    if not mcp_stub_server.is_configured():
+        return _error(503, "Serveur MCP vide non configure (Redis manquant).")
+    session_id = generate_token(16)
+
+    def generate():
+        pubsub = mcp_stub_server.subscribe(session_id)
+        try:
+            yield f"event: endpoint\ndata: /api/workspace/mcp/stub/messages?sessionId={session_id}\n\n"
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"event: message\ndata: {raw['data']}\n\n"
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/mcp/stub/messages", methods=["POST"])
+def mcp_stub_messages_route():
+    if not mcp_stub_server.is_configured():
+        return _error(503, "Serveur MCP vide non configure (Redis manquant).")
+    session_id = str(request.args.get("sessionId", ""))[:64]
+    if not session_id:
+        return _error(400, "sessionId manquant.")
+    body = request.get_json(silent=True) or {}
+    response_payload = mcp_stub_server.handle_jsonrpc(body)
+    mcp_stub_server.publish_response(session_id, response_payload)
+    return "", 202
+
+
 @workspace_bp.route("/conversations/<conversation_id>/typing", methods=["POST"])
 @limiter.limit("60 per minute")
 def typing_route(conversation_id):
@@ -870,11 +916,12 @@ def list_connections_route():
 @workspace_bp.route("/connections", methods=["POST"])
 @limiter.limit("20 per minute")
 def create_connection_route():
-    """Seul le nom est obligatoire : les DEUX entrees possibles ci-dessous
-    (cle API generalisee / OAuth generique, voir librairies/connections_bank.py)
-    sont facultatives et independantes -- on peut remplir l'une, l'autre, les
-    deux, ou aucune (la connexion reste alors juste un espace reserve, sans
-    credential, jusqu'a une modification ulterieure)."""
+    """Seul le nom est obligatoire : les TROIS entrees possibles ci-dessous
+    (cle API generalisee / OAuth generique / serveur MCP, voir
+    librairies/connections_bank.py) sont facultatives et independantes -- on
+    peut remplir n'importe laquelle, plusieurs, ou aucune (la connexion reste
+    alors juste un espace reserve, sans credential, jusqu'a une modification
+    ulterieure)."""
     user, err = _require_user()
     if err:
         return err
@@ -913,6 +960,18 @@ def create_connection_route():
     if any(oauth_fields) and not all(oauth_fields):
         return _error(400, "Renseigne les 4 champs de connexion OAuth (client, secret, URL d'autorisation, URL de jeton), ou aucun.")
 
+    mcp_entry = data.get("mcpEntry") or {}
+    if not isinstance(mcp_entry, dict):
+        return _error(400, "Entree serveur MCP invalide.")
+    mcp_server_url = str(mcp_entry.get("serverUrl", "")).strip()
+    mcp_auth_location = str(mcp_entry.get("authLocation", "none")).strip() or "none"
+    mcp_auth_field_name = str(mcp_entry.get("authFieldName", "")).strip()[:100]
+    mcp_auth_token = str(mcp_entry.get("authToken", "")).strip()
+    if mcp_auth_location not in connections_bank.MCP_AUTH_LOCATIONS:
+        return _error(400, "Type d'authentification MCP invalide.")
+    if mcp_auth_location == "header_custom" and not mcp_auth_field_name:
+        return _error(400, "Nom du champ requis pour une authentification MCP par en-tete personnalise.")
+
     try:
         connection = connections_bank.create_connection(
             name=name,
@@ -920,6 +979,7 @@ def create_connection_route():
             keywords=keywords,
             api_key=api_key,
             oauth_client_secret=oauth_client_secret,
+            mcp_secret=mcp_auth_token,
             config={
                 "baseUrl": base_url,
                 "authLocation": auth_location,
@@ -928,6 +988,9 @@ def create_connection_route():
                 "oauthAuthorizeUrl": oauth_authorize_url,
                 "oauthTokenUrl": oauth_token_url,
                 "oauthScope": oauth_scope,
+                "mcpServerUrl": mcp_server_url,
+                "mcpAuthLocation": mcp_auth_location,
+                "mcpAuthFieldName": mcp_auth_field_name,
             },
         )
     except RuntimeError:

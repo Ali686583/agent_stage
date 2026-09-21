@@ -48,6 +48,10 @@ N8N_WEBHOOK_CHATGPT_URL = os.environ.get("N8N_WEBHOOK_CHATGPT_URL", "")
 N8N_WEBHOOK_CLAUDE_URL = os.environ.get("N8N_WEBHOOK_CLAUDE_URL", "")
 N8N_WEBHOOK_SECRET = os.environ.get("N8N_WEBHOOK_SECRET", "")
 N8N_TIMEOUT_SECONDS = int(os.environ.get("N8N_TIMEOUT_SECONDS", "90"))
+# Entree 3 (serveur MCP) : un workflow n8n a une structure fixe (nombre de
+# blocs "MCP Client" fige a la conception, voir librairies/connections_bank.py),
+# jamais un nombre illimite de connexions simultanees.
+MAX_MCP_SERVERS_PER_REQUEST = 5
 # Meme instance n8n que N8N_API_URL (utilisee cote backend pour creer les
 # workflows de la banque, voir librairies/n8n_client.py) : sert ici a
 # reconstruire l'URL d'execution reelle d'un bouton de la banque a partir de
@@ -368,6 +372,16 @@ def execute_workflow_run(
     relevant_connections = platform_client.select_relevant_connections(
         candidate_connections, message_text, action_names
     )
+    # Entree 3 (serveur MCP, voir connections_bank.py) : contrairement aux
+    # entrees 1/2, ce backend n'appelle jamais le serveur lui-meme -- n8n le
+    # fait directement (bloc "AI Agent" + "MCP Client", qui choisit lui-meme
+    # QUAND et QUEL outil appeler pendant la generation de la reponse). On se
+    # contente ici de rassembler la configuration (secret dechiffre inclus)
+    # des connexions pertinentes et de la transmettre telle quelle. Un
+    # workflow n8n a une structure fixe (nombre de blocs "MCP Client" fige a
+    # la conception) : on plafonne donc a MAX_MCP_SERVERS_PER_REQUEST, jamais
+    # un nombre illimite.
+    mcp_servers = []
     for connection in relevant_connections:
         try:
             resolved = connections_bank.get_connection_secret(connection["id"])
@@ -403,6 +417,34 @@ def execute_workflow_run(
             }
         )
 
+        if len(mcp_servers) < MAX_MCP_SERVERS_PER_REQUEST:
+            try:
+                mcp_config = connections_bank.get_mcp_config_with_secret(connection["id"])
+            except RuntimeError:
+                mcp_config = None
+            if mcp_config:
+                mcp_servers.append(mcp_config)
+
+    # Le workflow n8n a un nombre FIXE de blocs "MCP Client" (voir plus haut) :
+    # verifie en conditions reelles qu'un bloc pointant vers une URL vide ou
+    # injoignable fait echouer TOUT l'Agent IA, meme pour une demande qui n'a
+    # besoin d'AUCUN serveur MCP (les emplacements non utilises restent
+    # branches au meme Agent). On comble donc systematiquement les
+    # emplacements restants avec un serveur MCP "vide" toujours disponible
+    # (voir librairies/mcp_stub_server.py), plutot que de laisser un
+    # emplacement vide qui casserait CHAQUE reponse.
+    while len(mcp_servers) < MAX_MCP_SERVERS_PER_REQUEST:
+        mcp_servers.append(
+            {
+                "name": "",
+                "serverUrl": f"{FRONTEND_URL}/api/workspace/mcp/stub",
+                "transport": "sse",
+                "authLocation": "none",
+                "authFieldName": "",
+                "secret": "",
+            }
+        )
+
     if drive_document_text is not None:
         prompt_text = _build_drive_summary_prompt(message_text, drive_document_text)
     elif web_search_results_text is not None:
@@ -431,6 +473,11 @@ def execute_workflow_run(
         # une connexion selectionnee mais non pertinente n'apparait meme
         # pas ici (jamais appelee, prompt §21/43).
         "platformData": platform_data,
+        # Entree 3 (serveur MCP) : secret dechiffre INCLUS ici -- necessaire
+        # (voir plus haut, n8n appelle lui-meme le serveur), mais ce dict
+        # complet ne doit JAMAIS etre persiste tel quel (voir stored_payload
+        # ci-dessous, qui redige ce champ avant l'ecriture en base).
+        "mcpServers": mcp_servers,
     }
 
     try:
@@ -454,13 +501,25 @@ def execute_workflow_run(
         _fail(run_id, conversation_id, user_message_id, request_id, "failed", "empty_response")
         return
 
+    # RÈGLE ABSOLUE (meme principe que connections_bank.py) : un secret MCP
+    # dechiffre ne doit jamais etre persiste en base, meme si `payload` (qui
+    # le contient, necessairement, pour que n8n puisse authentifier son appel
+    # au serveur) a deja ete envoye tel quel a n8n ci-dessus. `results.request`
+    # est lisible par tout participant de la conversation (voir
+    # workspace_routes.get_result_route) : on y stocke une version redigee.
+    stored_payload = dict(payload)
+    stored_payload["mcpServers"] = [
+        {**{k: v for k, v in server.items() if k != "secret"}, "hasSecret": bool(server.get("secret"))}
+        for server in mcp_servers
+    ]
+
     result = workspace.create_result(
         conversation_id=conversation_id,
         message_id=user_message_id,
         user_id=user_id,
         model=model,
         workflow_type=action_id or model,
-        request=payload,
+        request=stored_payload,
         response={"blocks": blocks},
         source_result_ids=source_result_ids,
         metadata=n8n_data.get("metadata"),
