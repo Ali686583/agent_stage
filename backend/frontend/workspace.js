@@ -33,6 +33,7 @@
     // reinitialise a chaque envoi (contrairement aux pieces jointes) :
     // cocher "API Finance" une fois reste coche pour les messages suivants.
     connections: [],
+    oauthGloballyConfigured: false,
     selectedConnectionIds: new Set(),
     projects: [],
     sharedProjects: [],
@@ -436,6 +437,30 @@
     showComposerError(t(messageKeyByStatus[status] || "workspace.google_drive_error"));
     // Nettoie l'URL (jamais garder ce parametre au rechargement/partage du lien).
     params.delete("googleDriveStatus");
+    const newSearch = params.toString();
+    window.history.replaceState({}, "", window.location.pathname + (newSearch ? `?${newSearch}` : ""));
+  }
+
+  // ---------------------------------------------------------------------
+  // Connexions plateformes/API, entree 2 (OAuth generique) : retour de
+  // redirection apres le flux d'autorisation (voir workspace_routes.py,
+  // connections_oauth_callback_route) -- meme principe que
+  // handleGoogleDriveRedirectStatus ci-dessus, code errreur stable jamais un
+  // texte serveur brut.
+  // ---------------------------------------------------------------------
+
+  function handleConnectionsOAuthRedirectStatus() {
+    const params = new URLSearchParams(window.location.search);
+    const status = params.get("connectionsOAuthStatus");
+    if (!status) return;
+    const messageKeyByStatus = {
+      connected: "workspace.connections_oauth_connected",
+      denied: "workspace.connections_oauth_error",
+      error: "workspace.connections_oauth_error",
+      state_mismatch: "workspace.connections_oauth_error",
+    };
+    showComposerError(t(messageKeyByStatus[status] || "workspace.connections_oauth_error"));
+    params.delete("connectionsOAuthStatus");
     const newSearch = params.toString();
     window.history.replaceState({}, "", window.location.pathname + (newSearch ? `?${newSearch}` : ""));
   }
@@ -2392,6 +2417,10 @@
     listBox.innerHTML = "";
     if (!ok || !data.ok) return;
     state.connections = data.connections;
+    // Jamais un bouton "Se connecter (OAuth)" qui echouerait systematiquement
+    // (meme principe que Google Drive, voir refreshGoogleDriveOption) :
+    // n'est propose que si le connecteur est configure sur ce deploiement.
+    state.oauthGloballyConfigured = !!data.oauthGloballyConfigured;
     // Une connexion supprimee ailleurs (autre onglet/utilisateur) ne doit
     // jamais rester cochee ici : re-synchronise la selection sur ce qui
     // existe reellement dans la banque.
@@ -2415,10 +2444,15 @@
         else state.selectedConnectionIds.delete(connection.id);
         updateConnectionsBadge();
       });
-      const label = el("label", { class: "connection-row-label", for: checkboxId }, [
-        el("span", { class: "connection-row-name", text: connection.name }),
-        el("span", { class: "connection-row-type", text: connection.platformType }),
-      ]);
+      const labelChildren = [el("span", { class: "connection-row-name", text: connection.name })];
+      // Champ "Plateforme / Type" retire du formulaire de creation (voir
+      // showAddConnectionForm) : ne reste affiche que pour les connexions
+      // deja creees avant ce changement, jamais une ligne vide pour les
+      // nouvelles.
+      if (connection.platformType) {
+        labelChildren.push(el("span", { class: "connection-row-type", text: connection.platformType }));
+      }
+      const label = el("label", { class: "connection-row-label", for: checkboxId }, labelChildren);
       label.addEventListener("click", (event) => event.stopPropagation());
       const menuBtn = el("button", {
         type: "button",
@@ -2450,6 +2484,38 @@
         },
       })
     );
+    // Entree 2 (OAuth generique) : n'affiche "Se connecter" que si la
+    // connexion a effectivement une configuration OAuth (voir
+    // connections_bank.py, hasOAuthConfig) -- jamais un bouton qui
+    // echouerait systematiquement. Une fois connectee, propose plutot
+    // "Deconnecter" (retire seulement le jeton, pas la connexion).
+    if (connection.hasOAuthConfig && (connection.oauthConnected || state.oauthGloballyConfigured)) {
+      if (connection.oauthConnected) {
+        menu.appendChild(
+          el("button", {
+            type: "button",
+            text: t("workspace.oauth_disconnect"),
+            onclick: async (event) => {
+              event.stopPropagation();
+              closeFixedMenu();
+              await api(`/connections/${connection.id}/oauth`, { method: "DELETE" });
+              if (onChanged) onChanged();
+            },
+          })
+        );
+      } else {
+        menu.appendChild(
+          el("button", {
+            type: "button",
+            text: t("workspace.oauth_connect"),
+            onclick: (event) => {
+              event.stopPropagation();
+              window.location.href = `${API}/connections/${connection.id}/oauth/connect`;
+            },
+          })
+        );
+      }
+    }
     menu.appendChild(
       el("button", {
         type: "button",
@@ -2509,30 +2575,48 @@
     menu.innerHTML = "";
     menu.appendChild(el("div", { class: "menu-label", text: t("workspace.add_connection") }));
 
+    // Seul le nom est obligatoire. Les DEUX entrees ci-dessous (cle API
+    // generalisee / OAuth generique -- voir librairies/connections_bank.py)
+    // sont affichees directement, facultatives et independantes : on peut
+    // remplir l'une, l'autre, les deux, ou aucune.
     const nameInput = el("input", { type: "text", placeholder: t("workspace.connection_name_placeholder") });
-    const typeInput = el("input", { type: "text", placeholder: t("workspace.connection_type_placeholder") });
-    const keyInput = el("input", { type: "password", placeholder: t("workspace.connection_api_key_placeholder") });
     const keywordsInput = el("input", { type: "text", placeholder: t("workspace.connection_keywords_placeholder") });
-    const baseUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_base_url_placeholder") });
 
-    const advancedWrap = el("div", { class: "project-create-form hidden" }, [baseUrlInput]);
-    const advancedToggle = el("button", {
-      type: "button",
-      class: "connections-advanced-toggle",
-      text: t("workspace.advanced_settings"),
-      onclick: (event) => {
-        event.stopPropagation();
-        advancedWrap.classList.toggle("hidden");
-      },
+    const apiKeyInput = el("input", { type: "password", placeholder: t("workspace.connection_api_key_placeholder") });
+    const baseUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_base_url_placeholder") });
+    const authLocationSelect = el("select", { class: "connections-select" }, [
+      el("option", { value: "header_bearer", text: t("workspace.connection_auth_bearer") }),
+      el("option", { value: "header_custom", text: t("workspace.connection_auth_header") }),
+      el("option", { value: "query_param", text: t("workspace.connection_auth_query") }),
+    ]);
+    const authFieldNameInput = el("input", { type: "text", placeholder: t("workspace.connection_auth_field_placeholder") });
+    const authFieldNameWrap = el("div", { class: "project-create-form hidden" }, [authFieldNameInput]);
+    authLocationSelect.addEventListener("change", (event) => {
+      event.stopPropagation();
+      authFieldNameWrap.classList.toggle("hidden", authLocationSelect.value === "header_bearer");
     });
+    authLocationSelect.addEventListener("click", (event) => event.stopPropagation());
+
+    const oauthClientIdInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_client_id_placeholder") });
+    const oauthClientSecretInput = el("input", { type: "password", placeholder: t("workspace.connection_oauth_client_secret_placeholder") });
+    const oauthAuthorizeUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_authorize_url_placeholder") });
+    const oauthTokenUrlInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_token_url_placeholder") });
+    const oauthScopeInput = el("input", { type: "text", placeholder: t("workspace.connection_oauth_scope_placeholder") });
 
     const form = el("div", { class: "project-create-form" }, [
       nameInput,
-      typeInput,
-      keyInput,
       keywordsInput,
-      advancedToggle,
-      advancedWrap,
+      el("div", { class: "connections-entry-label", text: t("workspace.connection_entry_api_key") }),
+      apiKeyInput,
+      baseUrlInput,
+      authLocationSelect,
+      authFieldNameWrap,
+      el("div", { class: "connections-entry-label", text: t("workspace.connection_entry_oauth") }),
+      oauthClientIdInput,
+      oauthClientSecretInput,
+      oauthAuthorizeUrlInput,
+      oauthTokenUrlInput,
+      oauthScopeInput,
       el("div", { class: "project-create-actions" }, [
         el("button", { type: "button", text: t("workspace.cancel"), onclick: (e) => { e.stopPropagation(); closeContextMenu(); } }),
         el("button", {
@@ -2542,9 +2626,7 @@
           onclick: async (event) => {
             event.stopPropagation();
             const name = nameInput.value.trim();
-            const platformType = typeInput.value.trim();
-            const apiKey = keyInput.value.trim();
-            if (!name || !platformType || !apiKey) {
+            if (!name) {
               showComposerError(t("workspace.error_generic"));
               return;
             }
@@ -2559,10 +2641,20 @@
               method: "POST",
               body: JSON.stringify({
                 name,
-                platformType,
-                apiKey,
                 keywords,
-                baseUrl: baseUrlInput.value.trim(),
+                apiKeyEntry: {
+                  apiKey: apiKeyInput.value.trim(),
+                  baseUrl: baseUrlInput.value.trim(),
+                  authLocation: authLocationSelect.value,
+                  authFieldName: authFieldNameInput.value.trim(),
+                },
+                oauthEntry: {
+                  clientId: oauthClientIdInput.value.trim(),
+                  clientSecret: oauthClientSecretInput.value.trim(),
+                  authorizeUrl: oauthAuthorizeUrlInput.value.trim(),
+                  tokenUrl: oauthTokenUrlInput.value.trim(),
+                  scope: oauthScopeInput.value.trim(),
+                },
               }),
             });
             if (!created.ok || !created.data.ok) {
@@ -3019,6 +3111,7 @@
     updateConnectionsBadge();
     handleGoogleDriveRedirectStatus();
     refreshGoogleDriveOption();
+    handleConnectionsOAuthRedirectStatus();
 
     dom.newProjectBtn.addEventListener("click", () => dom.projectForm.classList.toggle("hidden"));
     dom.projectCancelBtn.addEventListener("click", () => {

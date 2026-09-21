@@ -9,13 +9,16 @@ pertinentes.
 
 LIMITE HONNETE (a signaler, pas a masquer) : ce projet n'a aujourd'hui
 AUCUNE integration specifique deja construite avec une plateforme externe
-(pas de Google Drive, pas de CRM, pas d'API Finance reelle). Le seul
-adaptateur cable ici est un client REST generique (GET authentifie par
-cle porteuse dans un en-tete), suffisant pour toute API qui accepte une
-cle API simple dans un en-tete. Brancher une integration reellement
-specifique (OAuth Google Drive, format de reponse d'un CRM precis, etc.)
-demanderait son propre adaptateur -- non fabrique ici pour ne pas simuler
-une integration qui n'existe pas reellement.
+(pas de CRM, pas d'API Finance reelle). L'adaptateur cable ici est un
+client REST generique (GET authentifie), suffisant pour toute API qui
+accepte un identifiant simple -- cle API (en-tete Bearer par defaut,
+en-tete personnalise, ou parametre d'URL, au choix de l'entree 1 de la
+connexion) ou jeton OAuth (entree 2, voir librairies/oauth_connector.py) :
+le credential est fourni par l'appelant, ce module ne sait pas d'ou il
+vient. Brancher une integration reellement specifique (format de reponse
+d'un CRM precis, pagination particuliere, etc.) demanderait son propre
+adaptateur -- non fabrique ici pour ne pas simuler une integration qui
+n'existe pas reellement.
 
 Pertinence : approche par mots-cles (prompt §42 : "évite les conditions
 codées en dur du type if platform === X" -- ici, aucune plateforme n'est
@@ -50,21 +53,32 @@ def select_relevant_connections(
     return [c for c in connections if is_relevant(c, haystack)]
 
 
-def fetch_platform_data(connection: dict, api_key: str, timeout: int = 10) -> tuple[dict | None, str | None]:
-    """Appelle la plateforme via un GET authentifie generique. Ne leve
-    JAMAIS : une source secondaire indisponible ne doit pas faire echouer
-    toute la demande (prompt §45), l'appelant recoit (None, erreur) et
-    continue sans cette source."""
+def fetch_platform_data(connection: dict, credential: str | None, timeout: int = 10) -> tuple[dict | None, str | None]:
+    """Appelle la plateforme via un GET authentifie generique. `credential`
+    peut venir de l'entree 1 (cle API) ou de l'entree 2 (jeton OAuth, voir
+    librairies/oauth_connector.py) -- ce module ne fait pas la difference,
+    seul l'appelant (librairies/jobs.py) sait d'ou il vient. Ne leve JAMAIS :
+    une source secondaire indisponible ne doit pas faire echouer toute la
+    demande (prompt §45), l'appelant recoit (None, erreur) et continue sans
+    cette source."""
     config = connection.get("config") or {}
     base_url = config.get("baseUrl")
     if not base_url:
         return None, "no_base_url_configured"
+    if not credential:
+        return None, "no_credential_configured"
+    auth_location = config.get("authLocation") or "header_bearer"
+    auth_field_name = config.get("authFieldName") or ""
+    headers: dict = {}
+    params: dict = {}
+    if auth_location == "header_custom" and auth_field_name:
+        headers[auth_field_name] = credential
+    elif auth_location == "query_param" and auth_field_name:
+        params[auth_field_name] = credential
+    else:
+        headers["Authorization"] = f"Bearer {credential}"
     try:
-        response = requests.get(
-            base_url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=timeout,
-        )
+        response = requests.get(base_url, headers=headers, params=params, timeout=timeout)
         response.raise_for_status()
         try:
             data = response.json()

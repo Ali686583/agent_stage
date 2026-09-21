@@ -29,8 +29,9 @@ import uuid
 import requests
 from flask import Blueprint, Response, jsonify, redirect, request, send_file, stream_with_context
 
-from librairies import connections_bank, database, google_drive, n8n_client, realtime, workflow_bank, workspace
+from librairies import connections_bank, database, google_drive, n8n_client, oauth_connector, realtime, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
+from librairies.oauth_connector import OAuthConnectorConfigError, OAuthConnectorError
 from librairies.jobs import execute_workflow_run, queue
 from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
@@ -65,6 +66,12 @@ ALLOWED_MODELS = {"chatgpt", "claude"}
 MESSAGE_MODE = "message"
 
 GOOGLE_OAUTH_STATE_COOKIE = "agent_stage_gdrive_oauth_state"
+# Connexions plateformes/API, entree 2 (OAuth generique, voir
+# librairies/oauth_connector.py) : contrairement au cookie Google Drive
+# ci-dessus, l'etat doit aussi vehiculer QUELLE connexion est en cours
+# d'autorisation (une connexion generique n'est pas "l'utilisateur courant",
+# voir _build_connections_oauth_state ci-dessous).
+CONNECTIONS_OAUTH_STATE_COOKIE = "agent_stage_connections_oauth_state"
 
 # Allowlist d'actions : le navigateur ne choisit jamais librement un workflow,
 # seuls ces identifiants sont acceptes puis transmis a n8n.
@@ -842,8 +849,6 @@ def remove_entry_action_route(entry_action_id):
 
 MAX_CONNECTIONS_PER_MESSAGE = 10
 
-ALLOWED_PLATFORM_TYPES_MAX_LENGTH = 60
-
 
 @workspace_bp.route("/connections", methods=["GET"])
 def list_connections_route():
@@ -855,39 +860,75 @@ def list_connections_route():
         connections = connections_bank.list_connections(search=search)
     except RuntimeError:
         return _error(503, "Banque de connexions non configuree.")
-    return jsonify(ok=True, connections=connections)
+    # Jamais un bouton "Se connecter (OAuth)" qui echouerait systematiquement
+    # (meme principe que google_drive_status_route/`configured`) : le
+    # frontend ne le propose que si CONNECTIONS_OAUTH_REDIRECT_URI est bien
+    # configuree sur ce deploiement.
+    return jsonify(ok=True, connections=connections, oauthGloballyConfigured=oauth_connector.is_globally_configured())
 
 
 @workspace_bp.route("/connections", methods=["POST"])
 @limiter.limit("20 per minute")
 def create_connection_route():
+    """Seul le nom est obligatoire : les DEUX entrees possibles ci-dessous
+    (cle API generalisee / OAuth generique, voir librairies/connections_bank.py)
+    sont facultatives et independantes -- on peut remplir l'une, l'autre, les
+    deux, ou aucune (la connexion reste alors juste un espace reserve, sans
+    credential, jusqu'a une modification ulterieure)."""
     user, err = _require_user()
     if err:
         return err
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()[:100]
-    platform_type = str(data.get("platformType", "")).strip()[:ALLOWED_PLATFORM_TYPES_MAX_LENGTH]
-    api_key = str(data.get("apiKey", "")).strip()
     keywords = data.get("keywords") or []
-    base_url = str(data.get("baseUrl", "")).strip()
-
     if not name:
         return _error(400, "Nom de la connexion requis.")
-    if not platform_type:
-        return _error(400, "Plateforme/type requis.")
-    if not api_key:
-        return _error(400, "Clef API requise.")
     if not isinstance(keywords, list):
         return _error(400, "Mots-cles invalides.")
+
+    api_entry = data.get("apiKeyEntry") or {}
+    if not isinstance(api_entry, dict):
+        return _error(400, "Entree cle API invalide.")
+    api_key = str(api_entry.get("apiKey", "")).strip()
+    base_url = str(api_entry.get("baseUrl", "")).strip()
+    auth_location = str(api_entry.get("authLocation", "header_bearer")).strip() or "header_bearer"
+    auth_field_name = str(api_entry.get("authFieldName", "")).strip()[:100]
+    if auth_location not in connections_bank.AUTH_LOCATIONS:
+        return _error(400, "Type d'authentification invalide.")
+    if auth_location != "header_bearer" and not auth_field_name:
+        return _error(400, "Nom du champ requis pour ce type d'authentification.")
+
+    oauth_entry = data.get("oauthEntry") or {}
+    if not isinstance(oauth_entry, dict):
+        return _error(400, "Entree OAuth invalide.")
+    oauth_client_id = str(oauth_entry.get("clientId", "")).strip()
+    oauth_client_secret = str(oauth_entry.get("clientSecret", "")).strip()
+    oauth_authorize_url = str(oauth_entry.get("authorizeUrl", "")).strip()
+    oauth_token_url = str(oauth_entry.get("tokenUrl", "")).strip()
+    oauth_scope = str(oauth_entry.get("scope", "")).strip()
+    oauth_fields = (oauth_client_id, oauth_client_secret, oauth_authorize_url, oauth_token_url)
+    # Independantes entre elles (entree 1 vs entree 2), mais coherente EN
+    # INTERNE : un flux OAuth partiel (2 champs sur 4) ne peut jamais
+    # fonctionner, donc soit tous les 4 champs, soit aucun.
+    if any(oauth_fields) and not all(oauth_fields):
+        return _error(400, "Renseigne les 4 champs de connexion OAuth (client, secret, URL d'autorisation, URL de jeton), ou aucun.")
 
     try:
         connection = connections_bank.create_connection(
             name=name,
-            platform_type=platform_type,
-            api_key=api_key,
             created_by=user["id"],
             keywords=keywords,
-            config={"baseUrl": base_url} if base_url else None,
+            api_key=api_key,
+            oauth_client_secret=oauth_client_secret,
+            config={
+                "baseUrl": base_url,
+                "authLocation": auth_location,
+                "authFieldName": auth_field_name,
+                "oauthClientId": oauth_client_id,
+                "oauthAuthorizeUrl": oauth_authorize_url,
+                "oauthTokenUrl": oauth_token_url,
+                "oauthScope": oauth_scope,
+            },
         )
     except RuntimeError:
         return _error(503, "Banque de connexions non configuree.")
@@ -932,6 +973,92 @@ def delete_connection_route(connection_id):
         return _error(503, "Banque de connexions non configuree.")
     if not deleted:
         return _error(404, "Connexion introuvable.")
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Entree 2 (OAuth generique) d'une connexion de la banque, voir
+# librairies/oauth_connector.py. Contrairement a Google Drive ci-dessous, le
+# `state` doit vehiculer QUELLE connexion est en cours d'autorisation (une
+# seule route de callback, partagee par toutes les plateformes externes
+# possibles) : on l'encode en clair dans le state lui-meme (pas un secret,
+# juste un identifiant), le cookie sert uniquement a verifier qu'il vient
+# bien de CE navigateur (protection CSRF standard du flux OAuth).
+# ---------------------------------------------------------------------------
+
+def _build_connections_oauth_state(connection_id: str) -> str:
+    return f"{connection_id}.{generate_token(16)}"
+
+
+def _connection_id_from_state(state: str) -> str | None:
+    if not state or "." not in state:
+        return None
+    connection_id, _, _ = state.partition(".")
+    return connection_id or None
+
+
+@workspace_bp.route("/connections/<connection_id>/oauth/connect", methods=["GET"])
+@limiter.limit("10 per minute")
+def connect_connection_oauth_route(connection_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not oauth_connector.is_globally_configured():
+        return _error(503, "Connecteur OAuth non configure sur ce deploiement.")
+    try:
+        state = _build_connections_oauth_state(connection_id)
+        authorization_url = oauth_connector.build_authorization_url(connection_id, state)
+    except OAuthConnectorConfigError:
+        return _error(400, "Cette connexion n'a pas de configuration OAuth (entree 2 vide).")
+    response = redirect(authorization_url)
+    response.set_cookie(
+        CONNECTIONS_OAUTH_STATE_COOKIE,
+        state,
+        max_age=600,
+        httponly=True,
+        secure=os.environ.get("COOKIE_SECURE", "true").lower() != "false",
+        samesite="Lax",
+        path="/",
+    )
+    return response
+
+
+@workspace_bp.route("/connections/oauth/callback", methods=["GET"])
+def connections_oauth_callback_route():
+    user, err = _require_user()
+    if err:
+        return err
+    frontend_url = os.environ.get("FRONTEND_URL", "").rstrip("/")
+    redirect_target = f"{frontend_url}/page2.html" if frontend_url else "/page2.html"
+
+    def _redirect_with_status(status: str):
+        response = redirect(f"{redirect_target}?connectionsOAuthStatus={status}")
+        response.delete_cookie(CONNECTIONS_OAUTH_STATE_COOKIE, path="/")
+        return response
+
+    expected_state = request.cookies.get(CONNECTIONS_OAUTH_STATE_COOKIE)
+    received_state = request.args.get("state")
+    if not expected_state or not received_state or not hmac.compare_digest(expected_state, received_state):
+        return _redirect_with_status("state_mismatch")
+    connection_id = _connection_id_from_state(received_state)
+    code = request.args.get("code")
+    if not connection_id or not code:
+        return _redirect_with_status("denied")
+    try:
+        oauth_connector.exchange_code_and_store(connection_id, code)
+    except (OAuthConnectorConfigError, OAuthConnectorError):
+        return _redirect_with_status("error")
+    return _redirect_with_status("connected")
+
+
+@workspace_bp.route("/connections/<connection_id>/oauth", methods=["DELETE"])
+def disconnect_connection_oauth_route(connection_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not connections_bank.get_connection(connection_id):
+        return _error(404, "Connexion introuvable.")
+    oauth_connector.disconnect(connection_id)
     return jsonify(ok=True)
 
 

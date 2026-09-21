@@ -18,14 +18,27 @@ applique ici a l'identique aux connexions).
 RÈGLE ABSOLUE (prompt §27-29) : la clef API en clair ne quitte JAMAIS ce
 module. Elle est chiffree (librairies/crypto_secrets.py) avant d'etre
 ecrite en base, et aucune fonction de ce fichier autre que
-get_connection_secret() ne la dechiffre. Toute fonction qui peut etre
+get_connection_secret() (cle API) / get_oauth_client_config() /
+get_oauth_tokens() (OAuth) ne la dechiffre. Toute fonction qui peut etre
 appelee (directement ou indirectement) depuis une route HTTP renvoie
-uniquement _public_connection(), qui ne contient jamais la clef.
+uniquement _public_connection(), qui ne contient jamais de secret en clair.
+
+DEUX ENTREES INDEPENDANTES ET FACULTATIVES (chacune peut etre vide, remplie,
+ou les deux a la fois) : une connexion "toutes plateformes" doit couvrir
+aussi bien une API a cle simple (Bearer/en-tete personnalise/parametre
+d'URL) qu'une plateforme exigeant OAuth2 (l'utilisateur fournit alors sa
+propre app OAuth -- client_id/secret + URLs d'autorisation/de jeton --
+obtenue sur la console developpeur de la plateforme visee, voir
+librairies/oauth_connector.py qui gere le flux reel). Contrairement a
+librairies/google_drive.py (jeton personnel par UTILISATEUR), un jeton
+OAuth ici est stocke au niveau de la CONNEXION et partage par tout l'espace
+collaboratif, coherent avec le reste de cette banque.
 """
 
 from __future__ import annotations
 
 import os
+import time
 import uuid
 from contextlib import contextmanager
 
@@ -39,6 +52,8 @@ BANK_DATABASE_URL = os.environ.get("WORKFLOW_BANK_DATABASE_URL", "")
 
 MAX_KEYWORDS = 15
 MAX_KEYWORD_LENGTH = 40
+
+AUTH_LOCATIONS = ("header_bearer", "header_custom", "query_param")
 
 
 @contextmanager
@@ -77,10 +92,10 @@ def _create_tables(conn) -> None:
         CREATE TABLE IF NOT EXISTS connections (
             id               TEXT PRIMARY KEY,
             name             TEXT NOT NULL,
-            platform_type    TEXT NOT NULL,
+            platform_type    TEXT,
             keywords         TEXT[] NOT NULL DEFAULT '{}',
             config           JSONB NOT NULL DEFAULT '{}'::jsonb,
-            secret_encrypted TEXT NOT NULL,
+            secret_encrypted TEXT,
             created_by       TEXT NOT NULL,
             status           TEXT NOT NULL DEFAULT 'active',
             created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -89,6 +104,27 @@ def _create_tables(conn) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS idx_connections_status ON connections (status);")
+    # Migration additive (deja deploye en production avec ces deux colonnes
+    # NOT NULL, du temps ou "Plateforme/Type" et la cle API etaient
+    # obligatoires) : desormais les deux entrees du formulaire sont
+    # facultatives, donc ces colonnes doivent pouvoir etre NULL.
+    conn.execute("ALTER TABLE connections ALTER COLUMN platform_type DROP NOT NULL;")
+    conn.execute("ALTER TABLE connections ALTER COLUMN secret_encrypted DROP NOT NULL;")
+    # Secret de la 2e entree possible (config OAuth generique) : independant
+    # de secret_encrypted (cle API de la 1re entree), voir le docstring du
+    # module.
+    conn.execute("ALTER TABLE connections ADD COLUMN IF NOT EXISTS oauth_client_secret_encrypted TEXT;")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS connection_oauth_tokens (
+            connection_id          TEXT PRIMARY KEY REFERENCES connections (id) ON DELETE CASCADE,
+            access_token_encrypted  TEXT,
+            refresh_token_encrypted TEXT,
+            expires_at              TIMESTAMPTZ,
+            updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        """
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -96,12 +132,25 @@ def _create_tables(conn) -> None:
 # ---------------------------------------------------------------------------
 
 def _public_connection(row) -> dict:
+    config = row["config"] or {}
+    has_oauth_config = bool(
+        config.get("oauthClientId") and config.get("oauthAuthorizeUrl") and config.get("oauthTokenUrl") and row.get("oauth_client_secret_encrypted")
+    )
     return {
         "id": row["id"],
         "name": row["name"],
-        "platformType": row["platform_type"],
+        "platformType": row["platform_type"] or "",
         "keywords": list(row["keywords"] or []),
-        "hasBaseUrl": bool((row["config"] or {}).get("baseUrl")),
+        # Entree 1 (cle API generalisee) : jamais la cle en clair, juste de
+        # quoi savoir si elle est renseignee et comment elle est envoyee.
+        "hasApiKey": bool(row["secret_encrypted"]),
+        "hasBaseUrl": bool(config.get("baseUrl")),
+        "authLocation": config.get("authLocation") or "header_bearer",
+        "authFieldName": config.get("authFieldName") or "",
+        # Entree 2 (OAuth generique) : configuree (app OAuth fournie) et/ou
+        # deja connectee (jeton obtenu) sont deux etats distincts.
+        "hasOAuthConfig": has_oauth_config,
+        "oauthConnected": bool(row.get("oauth_connected")),
         "createdBy": row["created_by"],
         "connected": True,
         "createdAt": row["created_at"].isoformat(),
@@ -133,13 +182,32 @@ def _clean_keywords(keywords) -> list[str]:
 
 def _clean_config(config: dict | None) -> dict:
     """N'accepte que des cles connues (jamais une configuration arbitraire
-    fournie par le frontend) : voir librairies/platform_client.py pour leur
-    usage (adaptateur REST generique)."""
+    fournie par le frontend) : voir librairies/platform_client.py (entree 1,
+    cle API) et librairies/oauth_connector.py (entree 2, OAuth) pour leur
+    usage."""
     config = config or {}
     cleaned: dict = {}
     base_url = str(config.get("baseUrl") or "").strip()[:500]
     if base_url.startswith("http://") or base_url.startswith("https://"):
         cleaned["baseUrl"] = base_url
+    auth_location = str(config.get("authLocation") or "").strip()
+    cleaned["authLocation"] = auth_location if auth_location in AUTH_LOCATIONS else "header_bearer"
+    auth_field_name = str(config.get("authFieldName") or "").strip()[:100]
+    if auth_field_name:
+        cleaned["authFieldName"] = auth_field_name
+
+    oauth_client_id = str(config.get("oauthClientId") or "").strip()[:200]
+    if oauth_client_id:
+        cleaned["oauthClientId"] = oauth_client_id
+    oauth_authorize_url = str(config.get("oauthAuthorizeUrl") or "").strip()[:500]
+    if oauth_authorize_url.startswith("http://") or oauth_authorize_url.startswith("https://"):
+        cleaned["oauthAuthorizeUrl"] = oauth_authorize_url
+    oauth_token_url = str(config.get("oauthTokenUrl") or "").strip()[:500]
+    if oauth_token_url.startswith("http://") or oauth_token_url.startswith("https://"):
+        cleaned["oauthTokenUrl"] = oauth_token_url
+    oauth_scope = str(config.get("oauthScope") or "").strip()[:300]
+    if oauth_scope:
+        cleaned["oauthScope"] = oauth_scope
     return cleaned
 
 
@@ -147,45 +215,60 @@ def _clean_config(config: dict | None) -> dict:
 # CRUD
 # ---------------------------------------------------------------------------
 
+# Jointure commune : ajoute oauth_connected (bool) a chaque ligne sans
+# jamais exposer les jetons eux-memes (voir _public_connection).
+_SELECT_WITH_OAUTH_STATE = """
+    SELECT c.*, (t.connection_id IS NOT NULL) AS oauth_connected
+    FROM connections c
+    LEFT JOIN connection_oauth_tokens t ON t.connection_id = c.id
+"""
+
+
 def create_connection(
     name: str,
-    platform_type: str,
-    api_key: str,
     created_by: str,
     keywords: list | None = None,
+    platform_type: str = "",
+    api_key: str = "",
+    oauth_client_secret: str = "",
     config: dict | None = None,
 ) -> dict:
+    """Les deux entrees (cle API / OAuth) sont facultatives et independantes
+    (voir le docstring du module) : api_key et oauth_client_secret peuvent
+    chacune etre vides, remplies, ou les deux a la fois. Jamais appele
+    encrypt_secret() sur une valeur vide (voir crypto_secrets.py)."""
     connection_id = str(uuid.uuid4())
-    secret_encrypted = encrypt_secret(api_key)
+    secret_encrypted = encrypt_secret(api_key) if api_key else None
+    oauth_client_secret_encrypted = encrypt_secret(oauth_client_secret) if oauth_client_secret else None
     with _db() as conn:
         row = conn.execute(
             """
-            INSERT INTO connections (id, name, platform_type, keywords, config, secret_encrypted, created_by)
-            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s)
+            INSERT INTO connections (
+                id, name, platform_type, keywords, config,
+                secret_encrypted, oauth_client_secret_encrypted, created_by
+            )
+            VALUES (%s, %s, %s, %s, %s::jsonb, %s, %s, %s)
             RETURNING *;
             """,
             (
                 connection_id,
                 name,
-                platform_type,
+                platform_type or None,
                 _clean_keywords(keywords),
                 Jsonb(_clean_config(config)),
                 secret_encrypted,
+                oauth_client_secret_encrypted,
                 created_by,
             ),
         ).fetchone()
+        row["oauth_connected"] = False
         return _public_connection(row)
 
 
 def list_connections(search: str = "", limit: int = 50) -> list[dict]:
     with _db() as conn:
         rows = conn.execute(
-            """
-            SELECT * FROM connections
-            WHERE status = 'active' AND name ILIKE %s
-            ORDER BY name ASC
-            LIMIT %s;
-            """,
+            _SELECT_WITH_OAUTH_STATE + " WHERE c.status = 'active' AND c.name ILIKE %s ORDER BY c.name ASC LIMIT %s;",
             (f"%{search}%", limit),
         ).fetchall()
         return [_public_connection(row) for row in rows]
@@ -196,7 +279,7 @@ def list_connections_by_ids(connection_ids: list[str]) -> list[dict]:
         return []
     with _db() as conn:
         rows = conn.execute(
-            "SELECT * FROM connections WHERE id = ANY(%s) AND status = 'active';",
+            _SELECT_WITH_OAUTH_STATE + " WHERE c.id = ANY(%s) AND c.status = 'active';",
             (connection_ids,),
         ).fetchall()
         return [_public_connection(row) for row in rows]
@@ -205,22 +288,103 @@ def list_connections_by_ids(connection_ids: list[str]) -> list[dict]:
 def get_connection(connection_id: str) -> dict | None:
     with _db() as conn:
         row = conn.execute(
-            "SELECT * FROM connections WHERE id = %s AND status = 'active';", (connection_id,)
+            _SELECT_WITH_OAUTH_STATE + " WHERE c.id = %s AND c.status = 'active';", (connection_id,)
         ).fetchone()
         return _public_connection(row) if row else None
 
 
 def get_connection_secret(connection_id: str) -> tuple[dict, str] | None:
     """Usage strictement interne (librairies/platform_client.py, appele
-    depuis le worker) : renvoie (connexion_publique, clef_en_clair), ou None
-    si introuvable. Ne JAMAIS exposer cette fonction via une route HTTP."""
+    depuis le worker) : renvoie (connexion_publique, clef_en_clair -- chaine
+    vide si l'entree 1 n'a pas ete renseignee), ou None si introuvable. Ne
+    JAMAIS exposer cette fonction via une route HTTP."""
     with _db() as conn:
         row = conn.execute(
             "SELECT * FROM connections WHERE id = %s AND status = 'active';", (connection_id,)
         ).fetchone()
         if not row:
             return None
-        return _internal_connection(row), decrypt_secret(row["secret_encrypted"])
+        secret = decrypt_secret(row["secret_encrypted"]) if row["secret_encrypted"] else ""
+        return _internal_connection(row), secret
+
+
+# ---------------------------------------------------------------------------
+# Entree 2 (OAuth generique) : voir librairies/oauth_connector.py, qui
+# orchestre le flux HTTP reel (redirection, echange de code, rafraichissement)
+# en s'appuyant uniquement sur ces accesseurs -- jamais de logique HTTP ici.
+# ---------------------------------------------------------------------------
+
+def get_oauth_client_config(connection_id: str) -> dict | None:
+    """Usage strictement interne (librairies/oauth_connector.py) : renvoie la
+    configuration OAuth dechiffree de cette connexion, ou None si la
+    connexion n'existe pas OU si l'entree 2 n'a pas ete renseignee (au moins
+    un champ requis manquant) -- jamais une config partielle silencieuse."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM connections WHERE id = %s AND status = 'active';", (connection_id,)
+        ).fetchone()
+    if not row:
+        return None
+    config = row["config"] or {}
+    client_id = config.get("oauthClientId")
+    authorize_url = config.get("oauthAuthorizeUrl")
+    token_url = config.get("oauthTokenUrl")
+    if not client_id or not authorize_url or not token_url or not row["oauth_client_secret_encrypted"]:
+        return None
+    return {
+        "clientId": client_id,
+        "clientSecret": decrypt_secret(row["oauth_client_secret_encrypted"]),
+        "authorizeUrl": authorize_url,
+        "tokenUrl": token_url,
+        "scope": config.get("oauthScope") or "",
+    }
+
+
+def set_oauth_tokens(connection_id: str, access_token: str, refresh_token: str | None, expires_in: int | None) -> None:
+    """Persiste (creation ou remplacement) le jeu de jetons OAuth d'une
+    connexion, chiffres. Usage strictement interne
+    (librairies/oauth_connector.py)."""
+    access_token_encrypted = encrypt_secret(access_token) if access_token else None
+    refresh_token_encrypted = encrypt_secret(refresh_token) if refresh_token else None
+    expires_at = time.time() + float(expires_in) if expires_in else None
+    with _db() as conn:
+        conn.execute(
+            """
+            INSERT INTO connection_oauth_tokens (connection_id, access_token_encrypted, refresh_token_encrypted, expires_at, updated_at)
+            VALUES (%s, %s, %s, to_timestamp(%s), now())
+            ON CONFLICT (connection_id) DO UPDATE SET
+                access_token_encrypted = EXCLUDED.access_token_encrypted,
+                refresh_token_encrypted = COALESCE(EXCLUDED.refresh_token_encrypted, connection_oauth_tokens.refresh_token_encrypted),
+                expires_at = EXCLUDED.expires_at,
+                updated_at = now();
+            """,
+            (connection_id, access_token_encrypted, refresh_token_encrypted, expires_at),
+        )
+
+
+def get_oauth_tokens(connection_id: str) -> dict | None:
+    """Usage strictement interne (librairies/oauth_connector.py) : renvoie
+    les jetons dechiffres de cette connexion, ou None si jamais connectee."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT * FROM connection_oauth_tokens WHERE connection_id = %s;", (connection_id,)
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "accessToken": decrypt_secret(row["access_token_encrypted"]) if row["access_token_encrypted"] else "",
+        "refreshToken": decrypt_secret(row["refresh_token_encrypted"]) if row["refresh_token_encrypted"] else "",
+        "expiresAt": row["expires_at"].timestamp() if row["expires_at"] else None,
+    }
+
+
+def clear_oauth_tokens(connection_id: str) -> bool:
+    """Deconnexion OAuth : supprime le jeton stocke, la connexion elle-meme
+    (nom, cle API eventuelle, config) reste intacte -- symetrique de
+    "Se connecter", qui ne fait que rajouter un jeton."""
+    with _db() as conn:
+        cursor = conn.execute("DELETE FROM connection_oauth_tokens WHERE connection_id = %s;", (connection_id,))
+        return cursor.rowcount > 0
 
 
 def rename_connection(connection_id: str, name: str, actor_user_id: str, is_admin: bool) -> dict | None:
@@ -234,6 +398,9 @@ def rename_connection(connection_id: str, name: str, actor_user_id: str, is_admi
             "UPDATE connections SET name = %s, updated_at = now() WHERE id = %s RETURNING *;",
             (name, connection_id),
         ).fetchone()
+        updated["oauth_connected"] = conn.execute(
+            "SELECT 1 FROM connection_oauth_tokens WHERE connection_id = %s;", (connection_id,)
+        ).fetchone() is not None
         return _public_connection(updated)
 
 

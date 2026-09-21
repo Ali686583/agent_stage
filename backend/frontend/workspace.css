@@ -1125,18 +1125,48 @@ html, body {
 }
 .connection-row-name { font-size: 0.84rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .connection-row-type { font-size: 0.72rem; color: var(--color-muted); }
-.connection-row-menu-btn {
+/* Selecteur ".connection-row .connection-row-menu-btn" (pas juste
+   ".connection-row-menu-btn") : necessaire pour l'emporter en specificite
+   CSS sur ".item-context-menu button" (une classe + un type = plus
+   specifique qu'une seule classe), qui sinon impose display:block +
+   width:100% a CE bouton et le fait deborder sur toute la largeur de la
+   ligne au lieu d'un carre compact colle a droite -- bug constate. */
+.connection-row .connection-row-menu-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
   border: 0;
   background: none;
   color: var(--color-muted);
   cursor: pointer;
-  padding: 4px 6px;
+  padding: 0;
   border-radius: var(--radius-small);
   opacity: 0;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  font-size: 0.9rem;
+  line-height: 1;
 }
 .connection-row:hover .connection-row-menu-btn { opacity: 1; }
 .connection-row-menu-btn:hover { background: var(--color-border); }
+.connections-entry-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-muted);
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--color-border-light);
+}
+.connections-select {
+  font: inherit;
+  font-size: 0.84rem;
+  padding: 7px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-small);
+  background: var(--color-bg);
+  color: var(--color-text);
+}
 .connections-advanced-toggle {
   border: 0;
   background: none;

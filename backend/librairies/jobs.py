@@ -26,7 +26,7 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import connections_bank, google_drive, platform_client, web_search, workflow_bank, workspace
+from librairies import connections_bank, google_drive, oauth_connector, platform_client, web_search, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.security import sign_file_token
 from librairies.web_search import WebSearchError
@@ -376,7 +376,18 @@ def execute_workflow_run(
         if not resolved:
             continue
         public_connection, secret = resolved
-        data, error = platform_client.fetch_platform_data(public_connection, secret)
+        # Entrees 1 (cle API) et 2 (OAuth) sont independantes et facultatives
+        # (voir connections_bank.py) : la cle API est essayee en premier si
+        # presente, sinon on retombe sur un jeton OAuth deja connecte -- une
+        # connexion sans aucune des deux remonte "no_credential_configured"
+        # (voir platform_client.py), jamais une erreur opaque.
+        credential = secret or None
+        if not credential:
+            try:
+                credential = oauth_connector.get_valid_access_token(connection["id"])
+            except RuntimeError:
+                credential = None
+        data, error = platform_client.fetch_platform_data(public_connection, credential)
         # Une plateforme secondaire indisponible ne fait jamais echouer
         # toute la demande (prompt §45) : on le signale simplement dans
         # le contexte transmis, l'IA (ou l'humain qui lit metadata) voit
