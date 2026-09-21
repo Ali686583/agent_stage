@@ -29,13 +29,13 @@ import uuid
 import requests
 from flask import Blueprint, Response, jsonify, redirect, request, send_file, stream_with_context
 
-from librairies import connections_bank, database, google_drive, mcp_stub_server, n8n_client, oauth_connector, realtime, workflow_bank, workspace
+from librairies import connections_bank, database, google_drive, mcp_stub_server, n8n_client, oauth_connector, realtime, web_search_tool_server, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.oauth_connector import OAuthConnectorConfigError, OAuthConnectorError
 from librairies.jobs import execute_workflow_run, queue
 from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
-from librairies.security import generate_token, hash_token, sign_file_token
+from librairies.security import generate_token, hash_token, sign_file_token, sign_tool_token
 
 SESSION_COOKIE_NAME = "agent_stage_session"
 
@@ -614,6 +614,69 @@ def mcp_stub_messages_route():
     body = request.get_json(silent=True) or {}
     response_payload = mcp_stub_server.handle_jsonrpc(body)
     mcp_stub_server.publish_response(session_id, response_payload)
+    return "", 202
+
+
+# ---------------------------------------------------------------------------
+# Outil "recherche web" agentique (voir librairies/web_search_tool_server.py
+# et librairies/jobs.py, champ webSearchToolUrl) : contrairement au serveur
+# MCP "vide" ci-dessus, cet outil fait un vrai travail (une recherche web
+# reelle) -- jamais expose sans signature (voir /files/<id>/signed, meme
+# principe : lien temporaire signe HMAC, pas d'authentification par session
+# possible pour un appelant serveur-a-serveur comme n8n). La route
+# "/messages" ne re-verifie pas la signature (le sessionId genere par la
+# route SSE ci-dessous, 16 octets aleatoires, joue deja ce role -- meme
+# principe que mcp_stub_messages_route juste au-dessus).
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/mcp/web-search", methods=["GET"])
+def web_search_tool_sse_route():
+    if not web_search_tool_server.is_configured():
+        return _error(503, "Outil de recherche web non configure (Redis manquant).")
+    expires_at = request.args.get("exp", type=int)
+    token = request.args.get("token", "")
+    if not expires_at or not token:
+        return _error(400, "Lien invalide.")
+    if int(time.time()) > expires_at:
+        return _error(410, "Lien expire.")
+    try:
+        expected = sign_tool_token("web-search-tool", expires_at)
+    except RuntimeError:
+        return _error(503, "Signature d'outils non configuree.")
+    if not hmac.compare_digest(expected, token):
+        return _error(403, "Lien invalide.")
+
+    session_id = generate_token(16)
+
+    def generate():
+        pubsub = web_search_tool_server.subscribe(session_id)
+        try:
+            yield f"event: endpoint\ndata: /api/workspace/mcp/web-search/messages?sessionId={session_id}\n\n"
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"event: message\ndata: {raw['data']}\n\n"
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/mcp/web-search/messages", methods=["POST"])
+def web_search_tool_messages_route():
+    if not web_search_tool_server.is_configured():
+        return _error(503, "Outil de recherche web non configure (Redis manquant).")
+    session_id = str(request.args.get("sessionId", ""))[:64]
+    if not session_id:
+        return _error(400, "sessionId manquant.")
+    body = request.get_json(silent=True) or {}
+    response_payload = web_search_tool_server.handle_jsonrpc(body)
+    web_search_tool_server.publish_response(session_id, response_payload)
     return "", 202
 
 

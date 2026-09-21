@@ -68,3 +68,15 @@ def sign_file_token(file_id: str, expires_at: int) -> str:
         raise RuntimeError("FILE_SIGNING_SECRET n'est pas configuree.")
     message = f"{file_id}:{expires_at}".encode("utf-8")
     return hmac.new(FILE_SIGNING_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()
+
+
+def sign_tool_token(resource: str, expires_at: int) -> str:
+    """Meme principe et meme secret que sign_file_token ci-dessus, generalise
+    a une ressource interne quelconque (ex : l'URL SSE de l'outil de
+    recherche web transmise a n8n, voir librairies/jobs.py et
+    librairies/web_search_tool_server.py) -- jamais une URL "outil" ouverte
+    sans signature sur l'internet public."""
+    if not FILE_SIGNING_SECRET:
+        raise RuntimeError("FILE_SIGNING_SECRET n'est pas configuree.")
+    message = f"{resource}:{expires_at}".encode("utf-8")
+    return hmac.new(FILE_SIGNING_SECRET.encode("utf-8"), message, hashlib.sha256).hexdigest()

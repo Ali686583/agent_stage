@@ -27,9 +27,9 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import chart_render, connections_bank, google_drive, oauth_connector, platform_client, web_search, workflow_bank, workspace
+from librairies import chart_render, connections_bank, google_drive, oauth_connector, platform_client, web_search, web_search_tool_server, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
-from librairies.security import sign_file_token
+from librairies.security import sign_file_token, sign_tool_token
 from librairies.web_search import WebSearchError
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
@@ -434,6 +434,31 @@ def execute_workflow_run(
             _fail(run_id, conversation_id, user_message_id, request_id, "failed", "workflow_not_configured")
             return
 
+    # Outil "recherche web" agentique (mission "fonctionnement agentique de
+    # ChatGPT et Claude") : disponible pour les webhooks PRINCIPAUX
+    # ChatGPT/Claude uniquement (mode normal, Resume Drive, Veille Web) --
+    # jamais pour un bouton de la banque avec son propre workflow n8n dedie
+    # (ceux-ci gardent leur propre logique de donnees, ex. SPS/Resumer PDF,
+    # jamais transformes en agent sans que ce soit demande). Toujours REEL :
+    # jamais un placeholder, contrairement aux emplacements MCP non utilises
+    # (voir mcp_servers plus bas).
+    # Repli sur le meme point d'ancrage neutre que les emplacements MCP non
+    # utilises (voir mcp_stub_server.py) si l'outil reel ne peut pas etre
+    # signe (config manquante) : le graphe n8n reste TOUJOURS valide (un
+    # noeud "MCP Client" pointant vers une URL vide/injoignable fait echouer
+    # tout l'Agent, verifie en conditions reelles) plutot que d'omettre le
+    # champ.
+    is_main_provider_webhook = webhook_url in (N8N_WEBHOOK_CHATGPT_URL, N8N_WEBHOOK_CLAUDE_URL)
+    web_search_tool_url = f"{FRONTEND_URL}/api/workspace/mcp/stub"
+    if is_main_provider_webhook and web_search_tool_server.is_configured():
+        expires_at = int(time.time()) + FILE_LINK_TTL_SECONDS
+        try:
+            tool_token = sign_tool_token("web-search-tool", expires_at)
+        except RuntimeError:
+            tool_token = None
+        if tool_token:
+            web_search_tool_url = f"{FRONTEND_URL}/api/workspace/mcp/web-search?exp={expires_at}&token={tool_token}"
+
     file_links = []
     for file_id in file_ids:
         expires_at = int(time.time()) + FILE_LINK_TTL_SECONDS
@@ -635,6 +660,11 @@ def execute_workflow_run(
         # Agent+MCP ou vers un appel direct classique -- jamais laisse a la
         # seule presence/pertinence d'une connexion MCP dans mcpServers.
         "mcpExplicitlyRequested": mcp_explicitly_requested,
+        # Outil de recherche web agentique (voir plus haut) : None pour un
+        # bouton de la banque (webhook dedie), une URL SSE signee sinon --
+        # c'est le workflow n8n qui decide de l'attacher ou non a l'Agent,
+        # jamais ce backend qui force une recherche.
+        "webSearchToolUrl": web_search_tool_url,
     }
 
     try:
@@ -683,6 +713,13 @@ def execute_workflow_run(
         {**{k: v for k, v in server.items() if k != "secret"}, "hasSecret": bool(server.get("secret"))}
         for server in mcp_servers
     ]
+    # Meme principe pour le lien signe de l'outil de recherche web (courte
+    # duree de vie, mais un lien signe valide reste un lien signe valide) :
+    # jamais persiste tel quel -- seul le repli neutre (voir plus haut, pas
+    # de token) est laisse visible, sinon juste un booleen.
+    stored_payload["webSearchToolUrl"] = (
+        web_search_tool_url if web_search_tool_url.endswith("/mcp/stub") else True
+    )
 
     result = workspace.create_result(
         conversation_id=conversation_id,
