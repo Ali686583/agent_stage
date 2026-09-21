@@ -284,11 +284,14 @@ def execute_workflow_run(
         except GoogleDriveError as exc:
             _fail(run_id, conversation_id, user_message_id, request_id, "failed", f"google_drive_{exc}")
             return
-    # Boutons integres "Veille Web (sans API)" / "Veille Web (Tavily)" : meme
-    # principe que Resume Drive ci-dessus -- recherche reelle cote serveur
-    # sur des sources PUBLIQUES uniquement, jamais de donnee personnelle,
-    # jamais un resultat invente (voir librairies/web_search.py).
-    elif action_id in (workflow_bank.WEB_MONITORING_FREE_ACTION_ID, workflow_bank.WEB_MONITORING_TAVILY_ACTION_ID):
+    # Boutons integres "Veille Web (sans API)" / "Veille Web (recherche
+    # generale)" : meme principe que Resume Drive ci-dessus -- recherche
+    # reelle cote serveur sur des sources PUBLIQUES uniquement, jamais de
+    # donnee personnelle, jamais un resultat invente (voir
+    # librairies/web_search.py). Aucune des deux ne necessite de cle API ni
+    # de compte (Tavily a ete ecarte : il demandait une carte bancaire meme
+    # sur son offre gratuite).
+    elif action_id in (workflow_bank.WEB_MONITORING_FREE_ACTION_ID, workflow_bank.WEB_MONITORING_GENERAL_ACTION_ID):
         webhook_url = N8N_WEBHOOK_CHATGPT_URL if model == "chatgpt" else N8N_WEBHOOK_CLAUDE_URL
         if not webhook_url:
             _fail(run_id, conversation_id, user_message_id, request_id, "failed", "workflow_not_configured")
@@ -297,7 +300,7 @@ def execute_workflow_run(
             if action_id == workflow_bank.WEB_MONITORING_FREE_ACTION_ID:
                 results = web_search.search_public_news_rss(message_text)
             else:
-                results = web_search.search_public_web_tavily(message_text)
+                results = web_search.search_public_web_general(message_text)
             web_search_results_text = web_search.format_results_for_prompt(results)
         except WebSearchError as exc:
             _fail(run_id, conversation_id, user_message_id, request_id, "failed", f"web_search_{exc}")

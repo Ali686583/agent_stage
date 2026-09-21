@@ -40,7 +40,10 @@ GOOGLE_DRIVE_ACTION_ID = "builtin-google-drive-summary"
 # meme raison que pour Google Drive (id fixe reconnu par librairies/jobs.py,
 # jamais route vers un webhook n8n).
 WEB_MONITORING_FREE_ACTION_ID = "builtin-web-monitoring-free"
-WEB_MONITORING_TAVILY_ACTION_ID = "builtin-web-monitoring-tavily"
+# Id de base de donnees conserve tel quel (deja deploye en production) meme
+# si ce bouton n'utilise plus Tavily -- voir ensure_web_monitoring_actions,
+# qui met a jour son nom/sa description affiches sans changer son id.
+WEB_MONITORING_GENERAL_ACTION_ID = "builtin-web-monitoring-tavily"
 _SYSTEM_CREATED_BY = "system"
 
 
@@ -300,15 +303,24 @@ def create_action(
 
 
 def ensure_action_with_id(action_id: str, name: str, description: str | None = None) -> dict:
-    """Cree une action a un id FIXE si elle n'existe pas deja (idempotent -
-    appele a chaque demarrage, voir ensure_google_drive_action). Contrairement
-    a create_action, workflow_record_id reste NULL : cette action n'a pas de
-    workflow n8n (voir la note d'architecture dans le module jobs.py qui la
-    traite specialement), et la colonne le permet deja (pas de NOT NULL)."""
+    """Cree une action a un id FIXE (idempotent - appele a chaque demarrage,
+    voir ensure_google_drive_action/ensure_web_monitoring_actions), ou
+    resynchronise son nom/sa description si elle existe deja -- ces boutons
+    integres sont geres par le code, pas par un utilisateur, donc leur
+    affichage doit toujours refleter la version deployee (ex. le
+    renommage "Tavily" -> "recherche generale" sans changer d'id, voir
+    WEB_MONITORING_GENERAL_ACTION_ID). Contrairement a create_action,
+    workflow_record_id reste NULL : cette action n'a pas de workflow n8n
+    (voir la note d'architecture dans le module jobs.py qui la traite
+    specialement), et la colonne le permet deja (pas de NOT NULL)."""
     with _db() as conn:
         existing = conn.execute("SELECT * FROM actions WHERE id = %s;", (action_id,)).fetchone()
         if existing:
-            return _public_action(existing)
+            row = conn.execute(
+                "UPDATE actions SET name = %s, description = %s, updated_at = now() WHERE id = %s RETURNING *;",
+                (name, description, action_id),
+            ).fetchone()
+            return _public_action(row)
         row = conn.execute(
             """
             INSERT INTO actions (id, name, workflow_record_id, created_by, description)
@@ -336,10 +348,12 @@ def ensure_google_drive_action() -> dict:
 
 
 def ensure_web_monitoring_actions() -> None:
-    """Enregistre (une seule fois, idempotent) les deux boutons integres de
-    veille web par mots-cles -- label "(sans API)" pour distinguer clairement
-    celui qui ne necessite aucune configuration de celui qui utilise Tavily
-    (cle API requise, voir librairies/web_search.py)."""
+    """Enregistre (et resynchronise a chaque demarrage) les deux boutons
+    integres de veille web par mots-cles -- deux sources gratuites, sans
+    compte ni cle API (decision explicite apres avoir ecarte Tavily, qui
+    demandait une carte bancaire meme sur son offre gratuite) : le flux RSS
+    Google Actualites (actualites) et une recherche generale via
+    DuckDuckGo (voir librairies/web_search.py)."""
     ensure_action_with_id(
         WEB_MONITORING_FREE_ACTION_ID,
         name="Veille Web (sans API)",
@@ -351,14 +365,14 @@ def ensure_web_monitoring_actions() -> None:
     add_entry_action(context_id="shared", action_id=WEB_MONITORING_FREE_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
 
     ensure_action_with_id(
-        WEB_MONITORING_TAVILY_ACTION_ID,
-        name="Veille Web (Tavily)",
+        WEB_MONITORING_GENERAL_ACTION_ID,
+        name="Veille Web (recherche générale)",
         description=(
-            "Recherche du web public par mots-cles via l'API Tavily. "
-            "Necessite la variable d'environnement TAVILY_API_KEY sur le serveur."
+            "Recherche generale (pas seulement des actualites) sur des pages publiques "
+            "via DuckDuckGo. Aucune cle API ni compte requis."
         ),
     )
-    add_entry_action(context_id="shared", action_id=WEB_MONITORING_TAVILY_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
+    add_entry_action(context_id="shared", action_id=WEB_MONITORING_GENERAL_ACTION_ID, created_by=_SYSTEM_CREATED_BY)
 
 
 def get_action(action_id: str) -> dict | None:

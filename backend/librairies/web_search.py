@@ -4,17 +4,27 @@ librairies/web_search.py
 
 Veille web par mots-cles, pour deux boutons integres distincts (voir
 workflow_bank.py) : "Veille Web (sans API)" (flux RSS public de Google
-Actualites, aucune cle requise) et "Veille Web (Tavily)" (API de recherche
-tierce, cle API requise).
+Actualites, actualites uniquement) et "Veille Web (recherche generale)"
+(resultats web generaux via DuckDuckGo, sans cle API, sans compte).
+
+Aucune des deux sources ne demande de compte, de cle ou de carte bancaire :
+choix delibere suite a la decision de ne pas utiliser un service payant
+(Tavily) qui demandait une carte bancaire meme sur son offre gratuite.
 
 LEGALITE (verifiee avant d'ecrire ce module, jamais supposee) : les deux
 sources ne portent QUE sur des pages/articles PUBLICS, jamais une recherche
-sur une personne identifiee. Le flux RSS Google Actualites est un canal de
-syndication publiquement documente, sans authentification, concu pour la
-consommation programmatique (different d'un scraping de la page HTML de
-resultats Google, que Google interdit explicitement hors de son API
-officielle). Tavily est une API commerciale dont les conditions d'usage
-autorisent explicitement ce cas d'usage (recherche pour agents IA).
+sur une personne identifiee.
+  - Le flux RSS Google Actualites est un canal de syndication publiquement
+    documente, sans authentification, concu pour la consommation
+    programmatique (different d'un scraping de la page HTML de resultats
+    Google, que Google interdit explicitement hors de son API officielle).
+  - La page de resultats HTML de DuckDuckGo (html.duckduckgo.com) n'a pas
+    d'equivalent officiel a une politique d'interdiction comme celle de
+    Google ; sa lecture automatisee est une pratique tres repandue (utilisee
+    par de nombreux outils open-source de recherche pour agents IA). Risque
+    juridique plus faible qu'un scraping Google, mais moins formellement
+    "sanctionne" qu'un flux RSS officiel -- transparence assumee plutot que
+    presentee comme une certitude absolue.
 
 N'invente jamais un resultat : toute source indisponible, vide ou en erreur
 remonte un code d'erreur stable (voir WebSearchError) plutot qu'un contenu
@@ -23,15 +33,17 @@ fabrique -- voir librairies/jobs.py, qui traduit ce code pour l'utilisateur.
 
 from __future__ import annotations
 
-import os
 import xml.etree.ElementTree as ET
-from urllib.parse import quote
+from html.parser import HTMLParser
+from urllib.parse import parse_qs, quote, urlparse
 
 import requests
 
-TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
-TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+DUCKDUCKGO_HTML_URL = "https://html.duckduckgo.com/html/"
+# Identifie honnetement l'appelant (jamais un User-Agent de navigateur usurpe) :
+# bonne pratique de scraping, et evite d'etre confondu avec un vrai utilisateur.
+DUCKDUCKGO_USER_AGENT = "agent-stage-veille-web/1.0 (+https://backend-production-7bf3.up.railway.app)"
 
 MAX_RESULTS = 8
 MAX_QUERY_LENGTH = 300
@@ -40,10 +52,6 @@ MAX_QUERY_LENGTH = 300
 class WebSearchError(RuntimeError):
     """Code d'erreur stable (jamais un texte libre) : voir jobs.py, qui le
     traduit pour l'utilisateur -- jamais une trace brute ou un secret affiche."""
-
-
-def is_tavily_configured() -> bool:
-    return bool(TAVILY_API_KEY)
 
 
 def _clean_query(keywords: str) -> str:
@@ -90,41 +98,87 @@ def search_public_news_rss(keywords: str, lang: str = "fr", country: str = "FR")
     return results
 
 
-def search_public_web_tavily(keywords: str) -> list[dict]:
-    """Recherche par mots-cles via l'API Tavily (necessite TAVILY_API_KEY,
-    fournie par l'environnement Railway -- jamais codee en dur)."""
-    if not TAVILY_API_KEY:
-        raise WebSearchError("not_configured")
+class _DuckDuckGoResultParser(HTMLParser):
+    """Extraction minimale (titre/lien/extrait) de la page de resultats HTML
+    "lite" de DuckDuckGo : pas de dependance externe (BeautifulSoup n'est
+    pas dans requirements.txt), juste le parseur HTML de la bibliotheque
+    standard. Best-effort : une structure HTML modifiee cote DuckDuckGo fait
+    au pire remonter une liste vide (donc "no_results"), jamais une erreur
+    ni un contenu invente."""
+
+    def __init__(self):
+        super().__init__()
+        self.results: list[dict] = []
+        self._capture: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
+        href = dict(attrs).get("href") or ""
+        if tag == "a" and "result__a" in classes:
+            self.results.append({"title": "", "url": _unwrap_duckduckgo_redirect(href), "snippet": ""})
+            self._capture = "title"
+        elif "result__snippet" in classes:
+            self._capture = "snippet"
+
+    def handle_data(self, data):
+        if self._capture and self.results:
+            self.results[-1][self._capture] += data
+
+    def handle_endtag(self, tag):
+        if tag in ("a", "div", "h2"):
+            self._capture = None
+
+
+def _unwrap_duckduckgo_redirect(href: str) -> str:
+    """DuckDuckGo enveloppe chaque lien dans une redirection interne
+    (/l/?uddg=<url encodee>&...) : on en extrait l'URL reelle pour ne jamais
+    renvoyer un lien de redirection opaque a l'utilisateur/l'IA."""
+    if not href:
+        return ""
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urlparse(href)
+    if "duckduckgo.com" in parsed.netloc and parsed.path == "/l/":
+        real_url = parse_qs(parsed.query).get("uddg")
+        if real_url:
+            return real_url[0]
+    return href
+
+
+def search_public_web_general(keywords: str) -> list[dict]:
+    """Recherche generale (pas seulement des actualites) sur des pages
+    publiques via DuckDuckGo, sans cle API ni compte -- voir la section
+    LEGALITE en tete de module."""
     query = _clean_query(keywords)
     try:
         response = requests.post(
-            TAVILY_SEARCH_URL,
-            json={"api_key": TAVILY_API_KEY, "query": query, "max_results": MAX_RESULTS, "search_depth": "basic"},
-            timeout=20,
+            DUCKDUCKGO_HTML_URL,
+            data={"q": query},
+            headers={"User-Agent": DUCKDUCKGO_USER_AGENT},
+            timeout=15,
         )
+        response.raise_for_status()
     except requests.exceptions.RequestException as exc:
         raise WebSearchError("network_error") from exc
-    if response.status_code in (401, 403):
-        raise WebSearchError("not_configured")
-    if not response.ok:
-        raise WebSearchError("network_error")
+
+    parser = _DuckDuckGoResultParser()
     try:
-        data = response.json()
-    except ValueError as exc:
+        parser.feed(response.text)
+    except Exception as exc:
         raise WebSearchError("network_error") from exc
 
     results = []
-    for item in (data.get("results") or [])[:MAX_RESULTS]:
-        title = (item.get("title") or "").strip()
+    for item in parser.results[:MAX_RESULTS]:
+        title = " ".join(item["title"].split())
         if not title:
             continue
         results.append(
             {
                 "title": title,
-                "url": item.get("url") or "",
-                "publishedAt": item.get("published_date") or "",
+                "url": item["url"],
+                "publishedAt": "",
                 "source": "",
-                "snippet": (item.get("content") or "")[:500],
+                "snippet": " ".join(item["snippet"].split()),
             }
         )
     if not results:
