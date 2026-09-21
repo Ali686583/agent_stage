@@ -60,18 +60,6 @@ html, body {
   overflow-y: auto;
 }
 
-/* Mention de copyright (voir NOTICE a la racine du depot pour le detail
-   juridique) : discrete, en bas de la barre laterale, n'entrave jamais
-   l'usage de l'application. */
-.sidebar-legal-footer {
-  margin-top: 12px;
-  padding: 8px 6px 2px;
-  font-size: 0.68rem;
-  color: var(--color-muted);
-  text-align: center;
-  opacity: 0.75;
-}
-
 /* Encoche en forme de trapeze aux angles arrondis (dessinee en SVG : un
    clip-path/border-radius CSS ne peut pas arrondir les coins d'un trapeze).
    La fleche est une couche par-dessus, seule a tourner selon l'etat

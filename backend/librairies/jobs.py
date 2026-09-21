@@ -20,6 +20,7 @@ request.url_root).
 from __future__ import annotations
 
 import os
+import re
 import time
 
 import redis
@@ -52,6 +53,12 @@ N8N_TIMEOUT_SECONDS = int(os.environ.get("N8N_TIMEOUT_SECONDS", "90"))
 # blocs "MCP Client" fige a la conception, voir librairies/connections_bank.py),
 # jamais un nombre illimite de connexions simultanees.
 MAX_MCP_SERVERS_PER_REQUEST = 5
+# Correction architecture MCP (2026-09-21) : le mecanisme Agent+MCP ne doit
+# JAMAIS s'activer simplement parce qu'un serveur MCP est connecte -- voir
+# _mcp_explicitly_requested_in_entry ci-dessous et son usage dans
+# execute_workflow_run. Toutes les formulations attendues ("le MCP X",
+# "un serveur MCP", "l'outil MCP") contiennent le mot "MCP" lui-meme.
+_MCP_EXPLICIT_TRIGGER_RE = re.compile(r"\bmcp\b", re.IGNORECASE)
 # Meme instance n8n que N8N_API_URL (utilisee cote backend pour creer les
 # workflows de la banque, voir librairies/n8n_client.py) : sert ici a
 # reconstruire l'URL d'execution reelle d'un bouton de la banque a partir de
@@ -207,6 +214,17 @@ def _build_prompt_with_context(
     )
 
 
+def _mcp_explicitly_requested_in_entry(message_text: str) -> bool:
+    """Cas A (correction architecture MCP, mission §3) : le MCP ne doit
+    jamais se declencher a cause de la simple disponibilite/pertinence
+    d'une connexion -- seulement si l'utilisateur ecrit explicitement le
+    mot "MCP" dans sa demande ("le MCP X", "un serveur MCP", "l'outil
+    MCP"...). Volontairement un simple mot-cle (coherent avec le reste de
+    ce module, qui n'a pas de comprehension semantique du langage
+    naturel) plutot qu'une liste de formulations fixes."""
+    return bool(_MCP_EXPLICIT_TRIGGER_RE.search(message_text or ""))
+
+
 def _fail(run_id: str, conversation_id: str, message_id: str, request_id: str, status: str, error: str) -> None:
     workspace.complete_workflow_run(run_id, status=status, error=error)
     try:
@@ -247,6 +265,95 @@ def _build_drive_summary_prompt(user_instruction: str, document_text: str) -> st
         "reel (titres, points cles, tableau si pertinent). N'invente aucune "
         "information absente du document ci-dessous.\n\n"
         f"--- DOCUMENT ---\n{document_text}\n--- FIN DU DOCUMENT ---{extra}"
+    )
+
+
+# Extensions/types traites comme du texte brut (decodage direct, aucune
+# dependance necessaire) -- volontairement une liste ouverte de formats
+# lisibles tels quels, jamais une simulation d'extraction pour un format non
+# reconnu (voir _extract_attachment_text ci-dessous, qui retourne alors une
+# erreur explicite plutot que d'inventer un contenu).
+_PLAIN_TEXT_EXTENSIONS = {
+    "txt", "md", "markdown", "csv", "tsv", "json", "log", "py", "js", "ts",
+    "html", "htm", "css", "yaml", "yml", "xml", "ini", "cfg",
+}
+
+
+def _extract_attachment_text(file_id: str, download_url: str) -> tuple[str | None, str | None]:
+    """Contenu REEL d'une piece jointe (mission "correction architecture
+    MCP" §2 : "le contenu pertinent du document doit etre fourni a l'IA...
+    independamment du MCP"). Ne leve jamais et n'invente jamais un contenu :
+    un format non pris en charge ou un telechargement en echec renvoie une
+    erreur explicite (texte, code), jamais un texte fabrique. Le worker RQ
+    n'a pas acces au volume de stockage (service Railway separe du service
+    web, voir railway volume list) : le fichier est donc recupere via son
+    URL signee, exactement comme n8n le fait deja pour les boutons de la
+    banque (voir file_links plus bas)."""
+    try:
+        file_record = workspace.get_file(file_id)
+    except Exception:
+        file_record = None
+    if not file_record:
+        return None, "fichier introuvable"
+    name = file_record.get("name") or file_id
+    mime_type = (file_record.get("mimeType") or "").lower()
+    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+    try:
+        response = requests.get(download_url, timeout=20)
+        response.raise_for_status()
+        raw = response.content
+    except requests.exceptions.RequestException as exc:
+        return None, f"telechargement impossible ({str(exc)[:150]})"
+
+    if mime_type.startswith("text/") or extension in _PLAIN_TEXT_EXTENSIONS:
+        return raw.decode("utf-8", errors="replace"), None
+
+    if mime_type == "application/pdf" or extension == "pdf":
+        try:
+            import io
+
+            from pypdf import PdfReader
+
+            reader = PdfReader(io.BytesIO(raw))
+            text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
+        except Exception as exc:
+            return None, f"extraction PDF impossible ({str(exc)[:150]})"
+        if not text:
+            return None, "PDF sans texte extractible (probablement une image scannee)"
+        return text, None
+
+    return None, f"type de fichier non pris en charge pour l'aperçu automatique ({extension or mime_type or 'inconnu'})"
+
+
+def _build_attached_documents_context(file_ids: list[str], file_links: list[dict]) -> str:
+    """Un bloc par piece jointe, dans l'ORDRE fourni -- jamais melange au
+    reste du prompt de facon a en perdre la source (mission §2 : "les
+    documents joints font partie du contexte du message"). Fonctionne
+    entierement independamment du MCP (aucun serveur MCP implique ici)."""
+    links_by_id = {link["fileId"]: link["url"] for link in file_links}
+    parts = []
+    for file_id in file_ids:
+        download_url = links_by_id.get(file_id)
+        if not download_url:
+            continue
+        text, error = _extract_attachment_text(file_id, download_url)
+        try:
+            file_record = workspace.get_file(file_id)
+        except Exception:
+            file_record = None
+        display_name = (file_record or {}).get("name") or file_id
+        if error:
+            parts.append(f"--- DOCUMENT JOINT : {display_name} (INDISPONIBLE : {error}) ---")
+        else:
+            parts.append(f"--- DOCUMENT JOINT : {display_name} ---\n{text}\n--- FIN DU DOCUMENT ---")
+    if not parts:
+        return ""
+    return (
+        "Document(s) reellement joint(s) par l'utilisateur a ce message (contenu "
+        "extrait automatiquement). Utilise ce contenu REEL pour repondre ; si un "
+        "document est marque INDISPONIBLE, dis-le clairement plutot que "
+        "d'inventer son contenu.\n\n" + "\n\n".join(parts)
     )
 
 
@@ -381,6 +488,30 @@ def execute_workflow_run(
     # workflow n8n a une structure fixe (nombre de blocs "MCP Client" fige a
     # la conception) : on plafonne donc a MAX_MCP_SERVERS_PER_REQUEST, jamais
     # un nombre illimite.
+    #
+    # CORRECTION ARCHITECTURE MCP (2026-09-21) : la pertinence par mot-cle
+    # ci-dessus reste utilisee telle quelle pour platform_data (entrees 1/2,
+    # INCHANGE), mais ne suffit plus a elle seule a attacher un serveur MCP
+    # (entree 3) -- voir mission "preserver le comportement normal de
+    # ChatGPT/Claude". Deux cas UNIQUEMENT (mission §3) :
+    #   Cas A -- mode normal / actions integrees (Resume Drive, Veille Web) :
+    #     ces requetes utilisent les MEMES webhooks principaux
+    #     N8N_WEBHOOK_CHATGPT_URL/CLAUDE_URL, dont le workflow n8n ne route
+    #     desormais vers l'Agent+MCP QUE si l'utilisateur a explicitement
+    #     ecrit "MCP" dans sa demande (voir _mcp_explicitly_requested_in_entry
+    #     et le flag mcpExplicitlyRequested plus bas).
+    #   Cas B -- bouton de la banque avec SON PROPRE workflow n8n (webhook
+    #     dedie, ligne ~320) : la decision "utiliser MCP ou non" appartient
+    #     entierement a CE workflow n8n (ses propres noeuds) -- ce backend
+    #     continue donc de fournir les connexions MCP pertinentes comme
+    #     avant, un workflow qui ne les consulte jamais (prompt classique,
+    #     ex. SPS/Veille brevets/Resumer PDF) n'en fait simplement rien.
+    is_bank_button_workflow = bool(action_id) and action_id not in (
+        workflow_bank.GOOGLE_DRIVE_ACTION_ID,
+        workflow_bank.WEB_MONITORING_FREE_ACTION_ID,
+        workflow_bank.WEB_MONITORING_GENERAL_ACTION_ID,
+    )
+    mcp_explicitly_requested = is_bank_button_workflow or _mcp_explicitly_requested_in_entry(message_text)
     mcp_servers = []
     for connection in relevant_connections:
         try:
@@ -417,7 +548,7 @@ def execute_workflow_run(
             }
         )
 
-        if len(mcp_servers) < MAX_MCP_SERVERS_PER_REQUEST:
+        if mcp_explicitly_requested and len(mcp_servers) < MAX_MCP_SERVERS_PER_REQUEST:
             try:
                 mcp_config = connections_bank.get_mcp_config_with_secret(connection["id"])
             except RuntimeError:
@@ -453,6 +584,17 @@ def execute_workflow_run(
         prompt_text = _build_prompt_with_context(
             conversation_id, user_message_id, message_text, source_result_ids, reply_to_message_id
         )
+        # Pieces jointes en mode normal (mission "correction architecture
+        # MCP" §2) : le contenu REEL est fourni a l'IA ici, cote backend --
+        # jamais via le mecanisme MCP (une piece jointe ne doit jamais
+        # provoquer d'appel MCP), et jamais pour un bouton de la banque (qui
+        # a deja sa propre logique de fichier dans son propre workflow n8n,
+        # ex. SPS/Resumer PDF -- ajouter cette extraction cote Python ferait
+        # double emploi et pourrait diverger de son traitement specifique).
+        if not action_id and file_ids:
+            attached_documents_text = _build_attached_documents_context(file_ids, file_links)
+            if attached_documents_text:
+                prompt_text = f"{attached_documents_text}\n\n{prompt_text}"
     # Politique de graphiques (voir librairies/chart_render.py) : injectee
     # dans CHAQUE prompt, quelle que soit son origine (entry, bouton
     # integre, ou resume Drive/veille web) -- un bouton/workflow qui a
@@ -488,6 +630,11 @@ def execute_workflow_run(
         # complet ne doit JAMAIS etre persiste tel quel (voir stored_payload
         # ci-dessous, qui redige ce champ avant l'ecriture en base).
         "mcpServers": mcp_servers,
+        # Correction architecture MCP : indique EXPLICITEMENT a n8n (workflows
+        # "chatgpt"/"claude" principaux) s'il faut router vers le mecanisme
+        # Agent+MCP ou vers un appel direct classique -- jamais laisse a la
+        # seule presence/pertinence d'une connexion MCP dans mcpServers.
+        "mcpExplicitlyRequested": mcp_explicitly_requested,
     }
 
     try:
