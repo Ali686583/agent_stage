@@ -59,12 +59,31 @@ def subscribe(session_id: str):
     return pubsub
 
 
+# Un seul outil factice, jamais reellement utile : decouvert en conditions
+# reelles que le noeud MCP Client de n8n traite une liste d'outils VIDE
+# comme une erreur ("MCP Server returned no tools"), exactement comme un
+# serveur injoignable -- un tools/list a [] ne suffit donc pas a eviter le
+# probleme que ce module existe pour resoudre. Un outil bidon (jamais
+# appele en pratique, sa description dissuade explicitement l'IA de
+# l'utiliser) fait passer la connexion pour "reussie" sans jamais rien
+# faire de reel s'il etait par erreur invoque.
+_NOOP_TOOL = {
+    "name": "noop_placeholder",
+    "description": (
+        "Internal placeholder with no real function. Never call this tool "
+        "under any circumstances -- it exists only to keep an unused "
+        "connection slot valid."
+    ),
+    "inputSchema": {"type": "object", "properties": {}},
+}
+
+
 def handle_jsonrpc(request_body: dict) -> dict | None:
     """Repond a une requete JSON-RPC MCP minimale : accepte "initialize" et
-    "tools/list" (toujours []), refuse proprement tout appel d'outil
-    ("tools/call" -- ne devrait jamais arriver, ce serveur n'annonce aucun
-    outil) par une erreur JSON-RPC standard plutot qu'un plantage. Renvoie
-    None pour une notification (pas de reponse attendue, ex :
+    "tools/list" (toujours [_NOOP_TOOL], voir plus haut), refuse proprement
+    tout appel d'outil ("tools/call" -- ne devrait jamais arriver en
+    pratique) par une erreur JSON-RPC standard plutot qu'un plantage.
+    Renvoie None pour une notification (pas de reponse attendue, ex :
     "notifications/initialized")."""
     method = request_body.get("method")
     request_id = request_body.get("id")
@@ -77,7 +96,15 @@ def handle_jsonrpc(request_body: dict) -> dict | None:
     elif method in ("notifications/initialized", "notifications/cancelled"):
         return None
     elif method == "tools/list":
-        result = {"tools": []}
+        result = {"tools": [_NOOP_TOOL]}
+    elif method == "tools/call":
+        if request_id is None:
+            return None
+        return {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {"content": [{"type": "text", "text": "This tool does nothing."}], "isError": False},
+        }
     else:
         if request_id is None:
             return None
