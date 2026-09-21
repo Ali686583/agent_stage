@@ -456,7 +456,7 @@ def delete_conversation_route(conversation_id):
     if err:
         return err
     try:
-        deleted = workspace.delete_conversation(conversation_id, user["id"])
+        deleted = workspace.delete_conversation(conversation_id, user["id"], is_admin=user.get("role") == "admin")
     except PermissionError as exc:
         return _error(403, str(exc))
     if not deleted:
@@ -1340,6 +1340,13 @@ def send_message_route():
     reply_to_message_id = str(data.get("replyToMessageId") or "") or None
     request_id = str(data.get("requestId") or "")[:100] or str(uuid.uuid4())
     is_message_mode = model == MESSAGE_MODE
+    # Mentions "@" (mission mentions) : liste d'identifiants utilisateur
+    # facultative, jamais une simple decoration texte -- voir plus bas, la
+    # validation reelle (participant de CETTE conversation) attend de savoir
+    # dans quelle conversation le message atterrit (nouvelle ou existante).
+    raw_mentioned_user_ids = data.get("mentionedUserIds") or []
+    if not isinstance(raw_mentioned_user_ids, list):
+        return _error(400, "mentionedUserIds invalide.")
 
     if model not in ALLOWED_MODELS and not is_message_mode:
         return _error(400, "Modele invalide.")
@@ -1449,6 +1456,15 @@ def send_message_route():
             if not conversation:
                 return _error(404, "Conversation introuvable.")
 
+        # Ne retient que les identifiants correspondant a de VRAIS participants
+        # de CETTE conversation (jamais fait confiance a une liste envoyee par
+        # le frontend) : une mention invalide/perimee est juste ignoree,
+        # jamais une erreur qui bloquerait l'envoi du message pour autant.
+        valid_participant_ids = {p["userId"] for p in workspace.list_participants(conversation_id)}
+        mentioned_user_ids = [
+            str(uid)[:100] for uid in raw_mentioned_user_ids if isinstance(uid, str) and uid in valid_participant_ids
+        ]
+
         user_message = workspace.add_message(
             conversation_id=conversation_id,
             user_id=user["id"],
@@ -1458,6 +1474,7 @@ def send_message_route():
             model=model,
             action_id=action_id,
             reply_to_message_id=reply_to_message_id,
+            mentioned_user_ids=mentioned_user_ids,
         )
         if file_ids:
             workspace.link_files_to_message(user_message["id"], file_ids)

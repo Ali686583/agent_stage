@@ -63,6 +63,16 @@
     typingUsers: new Map(), // userId -> { displayName, avatarUrl, timeoutId }
     lastTypingPingAt: 0,
     pendingRequests: new Map(), // requestId -> { loadingRow, showSendError } (Phase 4, reponses asynchrones)
+    // Mentions "@" (discussions communes) : liste des {userId, displayName}
+    // reellement inseres dans le texte du composer, pas juste "tapes" -- un
+    // "@Nom" ensuite efface par l'utilisateur est retire au moment de
+    // l'envoi (voir sendMessage), jamais renvoye comme mention fantome.
+    composerMentions: [],
+    // Participants de la conversation ACTUELLEMENT ouverte, pour le menu de
+    // mentions -- rechargee a chaque ouverture de conversation commune (voir
+    // openConversation), jamais suppose a jour indefiniment.
+    mentionCandidates: [],
+    mentionMenu: null, // {triggerStart, activeIndex, filtered}
   };
 
   // ---------------------------------------------------------------------
@@ -1170,6 +1180,33 @@
         });
       }
     }
+    // "Supprimer la discussion" (commune) : reserve au createur (ou un
+    // administrateur, verifie de toute facon cote serveur -- voir
+    // workspace.delete_conversation) -- meme garde-fou que pour une
+    // conversation personnelle, juste applique ici a is_shared=true.
+    if (conversation.createdByUserId === state.user.id) {
+      menu.appendChild(el("div", { class: "menu-divider" }));
+      menu.appendChild(
+        el("button", {
+          type: "button",
+          class: "danger-text",
+          text: t("workspace.delete_conversation"),
+          onclick: (event) => {
+            event.stopPropagation();
+            closeContextMenu();
+            showConfirmModal(t("workspace.confirm_delete_conversation"), async () => {
+              const { ok, data } = await api(`/conversations/${conversation.id}`, { method: "DELETE" });
+              if (ok && data.ok) {
+                if (state.conversationId === conversation.id) startNewDiscussion();
+                await loadSharedConversations();
+              } else {
+                showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+              }
+            });
+          },
+        })
+      );
+    }
     anchorBtn.parentElement.appendChild(menu);
     activeContextMenu = menu;
     setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
@@ -1194,6 +1231,14 @@
     if (!ok || !data.ok) return;
     state.conversationId = conversationId;
     state.conversationTitle = data.conversation.title;
+    // Mentions "@" : seulement pertinent pour une discussion commune (voir
+    // workspace.list_participants, qui existe deja pour toute conversation
+    // mais n'a de vrai sens de "personnes a mentionner" que la ou plusieurs
+    // participants coexistent reellement).
+    state.composerMentions = [];
+    state.mentionCandidates = [];
+    closeMentionMenu();
+    if (data.conversation.isShared) loadMentionCandidates(conversationId);
     dom.centralColumn.classList.remove("is-empty");
     dom.conversationArea.innerHTML = "";
     state.seenMessageIds = new Set();
@@ -1416,6 +1461,44 @@
     }
   }
 
+  // Surligne chaque "@Nom" (mentions structurees, voir message.mentions)
+  // dans le DOM deja rendu d'une bulle de message : parcourt uniquement les
+  // noeuds TEXTE (jamais le HTML lui-meme, pour ne jamais casser un rendu
+  // markdown deja assaini) et remplace les occurrences exactes par un
+  // <span class="mention-tag">.
+  function highlightMentions(container, mentions) {
+    if (!mentions.length) return;
+    const names = mentions.map((m) => m.displayName).filter(Boolean);
+    if (!names.length) return;
+    const pattern = new RegExp(`@(${names.map(escapeRegExp).join("|")})(?![\\w])`, "g");
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+    const targets = [];
+    let node;
+    while ((node = walker.nextNode())) {
+      if (pattern.test(node.textContent)) targets.push(node);
+      pattern.lastIndex = 0;
+    }
+    targets.forEach((textNode) => {
+      const frag = document.createDocumentFragment();
+      let lastIndex = 0;
+      let match;
+      pattern.lastIndex = 0;
+      while ((match = pattern.exec(textNode.textContent))) {
+        if (match.index > lastIndex) {
+          frag.appendChild(document.createTextNode(textNode.textContent.slice(lastIndex, match.index)));
+        }
+        frag.appendChild(el("span", { class: "mention-tag", text: match[0] }));
+        lastIndex = match.index + match[0].length;
+      }
+      frag.appendChild(document.createTextNode(textNode.textContent.slice(lastIndex)));
+      textNode.replaceWith(frag);
+    });
+  }
+
+  function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
   function typewrite(target, text, cursor) {
     const reduced = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduced) {
@@ -1469,6 +1552,12 @@
       const textDiv = el("div", { class: "block-markdown" });
       textDiv.textContent = message.content;
       bubble.appendChild(textDiv);
+    }
+    // Mentions "@" : surlignage APRES le rendu (blocks ou texte brut), sur
+    // le DOM deja construit -- ne touche que les noeuds de texte, ne casse
+    // jamais le HTML du rendu markdown (voir highlightMentions).
+    if (message.mentions && message.mentions.length) {
+      highlightMentions(bubble, message.mentions);
     }
     if (message.attachments && message.attachments.length) {
       const attWrap = el("div", { class: "message-attachments" });
@@ -1997,9 +2086,138 @@
     state.replyToMessageId = null;
     state.replyPreviewText = "";
     state.selectedWidgetIndex = null;
+    state.composerMentions = [];
+    closeMentionMenu();
     renderFileChips();
     renderActionWidgets();
     renderReplyPreview();
+  }
+
+  // ---------------------------------------------------------------------
+  // Mentions "@" (discussions communes) : menu deroulant filtrable au clavier
+  // ET a la souris, insertion structuree (userId + nom, jamais juste du
+  // texte colore -- voir librairies/database.py::message_mentions).
+  // ---------------------------------------------------------------------
+
+  async function loadMentionCandidates(conversationId) {
+    const { ok, data } = await api(`/conversations/${conversationId}/participants`);
+    if (!ok || !data.ok) return;
+    state.mentionCandidates = (data.participants || []).filter((p) => p.userId !== state.user.id);
+  }
+
+  function closeMentionMenu() {
+    if (state.mentionMenu && state.mentionMenu.node) state.mentionMenu.node.remove();
+    state.mentionMenu = null;
+  }
+
+  function mentionMenuCandidates(query) {
+    const q = query.toLowerCase();
+    return state.mentionCandidates.filter((p) => p.displayName.toLowerCase().includes(q)).slice(0, 8);
+  }
+
+  function insertMention(candidate) {
+    if (!state.mentionMenu) return;
+    const { triggerStart } = state.mentionMenu;
+    const textarea = dom.composerTextarea;
+    const cursor = textarea.selectionStart;
+    const before = textarea.value.slice(0, triggerStart);
+    const after = textarea.value.slice(cursor);
+    const insertion = `@${candidate.displayName} `;
+    textarea.value = before + insertion + after;
+    const newCursor = before.length + insertion.length;
+    textarea.setSelectionRange(newCursor, newCursor);
+    textarea.focus();
+    autoResize();
+    // Deduplique par userId : re-mentionner la meme personne ne cree pas
+    // deux entrees (voir aussi la deduplication cote serveur, redondante
+    // par prudence, jamais la seule ligne de defense).
+    if (!state.composerMentions.some((m) => m.userId === candidate.userId)) {
+      state.composerMentions.push({ userId: candidate.userId, displayName: candidate.displayName });
+    }
+    closeMentionMenu();
+  }
+
+  function renderMentionMenu(triggerStart, candidates, activeIndex) {
+    closeMentionMenu();
+    const menu = el("div", { class: "mention-menu" });
+    if (!candidates.length) {
+      menu.appendChild(el("div", { class: "mention-menu-empty", text: t("workspace.mention_no_results") }));
+    } else {
+      candidates.forEach((candidate, index) => {
+        const item = el("button", {
+          type: "button",
+          class: `mention-menu-item${index === activeIndex ? " active" : ""}`,
+          onclick: (event) => {
+            event.preventDefault();
+            insertMention(candidate);
+          },
+        }, [
+          avatarNode("sidebar-item-avatar", candidate.avatarUrl, candidate.displayName),
+          el("span", { text: candidate.displayName }),
+        ]);
+        // mousedown (pas click) : evite que le textarea ne perde le focus et
+        // ne ferme le menu (blur) avant que le clic ne soit traite.
+        item.addEventListener("mousedown", (event) => {
+          event.preventDefault();
+          insertMention(candidate);
+        });
+        menu.appendChild(item);
+      });
+    }
+    const rect = dom.composer.getBoundingClientRect();
+    menu.style.position = "fixed";
+    menu.style.left = `${rect.left}px`;
+    menu.style.bottom = `${window.innerHeight - rect.top + 6}px`;
+    document.body.appendChild(menu);
+    state.mentionMenu = { triggerStart, candidates, activeIndex, node: menu };
+  }
+
+  function handleMentionInput() {
+    const textarea = dom.composerTextarea;
+    const cursor = textarea.selectionStart;
+    const textBeforeCursor = textarea.value.slice(0, cursor);
+    // Declenche seulement apres un debut de mot ("@" en tout debut, ou
+    // precede d'un espace/retour a la ligne) -- jamais au milieu d'une
+    // adresse email ou d'un mot quelconque contenant "@".
+    const match = textBeforeCursor.match(/(?:^|[\s\n])@([^\s@]*)$/);
+    if (!match || !state.mentionCandidates.length) {
+      closeMentionMenu();
+      return;
+    }
+    const triggerStart = cursor - match[0].length + (match[0].startsWith("@") ? 0 : 1);
+    const query = match[1];
+    const candidates = mentionMenuCandidates(query);
+    renderMentionMenu(triggerStart, candidates, 0);
+  }
+
+  function handleMentionKeydown(event) {
+    if (!state.mentionMenu) return false;
+    const { candidates, activeIndex } = state.mentionMenu;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      const next = candidates.length ? (activeIndex + 1) % candidates.length : 0;
+      renderMentionMenu(state.mentionMenu.triggerStart, candidates, next);
+      return true;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      const next = candidates.length ? (activeIndex - 1 + candidates.length) % candidates.length : 0;
+      renderMentionMenu(state.mentionMenu.triggerStart, candidates, next);
+      return true;
+    }
+    if (event.key === "Enter" || event.key === "Tab") {
+      if (candidates.length) {
+        event.preventDefault();
+        insertMention(candidates[activeIndex]);
+        return true;
+      }
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMentionMenu();
+      return true;
+    }
+    return false;
   }
 
   // ---------------------------------------------------------------------
@@ -2840,6 +3058,13 @@
     if (state.replyToMessageId) {
       payload.replyToMessageId = state.replyToMessageId;
     }
+    // Mentions "@" : ne garde que celles dont le "@Nom" exact est encore
+    // present dans le texte envoye -- une mention inseree puis effacee par
+    // l'utilisateur ne doit jamais etre renvoyee comme mention fantome.
+    const activeMentions = state.composerMentions.filter((m) => text.includes(`@${m.displayName}`));
+    if (activeMentions.length) {
+      payload.mentionedUserIds = activeMentions.map((m) => m.userId);
+    }
     // Un bouton de la banque (Phase 5) declenche SON PROPRE workflow n8n
     // cote backend (voir jobs.py) : jamais confondu avec le provider
     // ChatGPT/Claude selectionne par ailleurs. Sans objet en mode "Message".
@@ -2859,6 +3084,7 @@
       widgetIndex: state.selectedWidgetIndex,
       replyToMessageId: state.replyToMessageId,
       replyPreviewText: state.replyPreviewText,
+      mentions: activeMentions.slice(),
     };
     resetComposer();
 
@@ -2875,6 +3101,7 @@
             state.selectedWidgetIndex = composerSnapshot.widgetIndex;
             state.replyToMessageId = composerSnapshot.replyToMessageId;
             state.replyPreviewText = composerSnapshot.replyPreviewText;
+            state.composerMentions = composerSnapshot.mentions;
             dom.composerTextarea.value = composerSnapshot.text;
             renderFileChips();
             renderActionWidgets();
@@ -2939,6 +3166,12 @@
         if (!bubbleEl.querySelector(".message-actions-user")) {
           bubbleEl.appendChild(renderUserMessageActions(optimisticUserMessage));
         }
+        // Le rendu optimiste initial n'a pas encore les mentions (connues
+        // seulement une fois la reponse serveur arrivee) : surligne
+        // maintenant, jamais besoin de rouvrir la conversation pour le voir.
+        if (data.userMessage.mentions && data.userMessage.mentions.length) {
+          highlightMentions(bubbleEl, data.userMessage.mentions);
+        }
       }
     }
     loadDiscussions(true);
@@ -2989,11 +3222,20 @@
   function wireComposer() {
     dom.composerTextarea.addEventListener("input", autoResize);
     dom.composerTextarea.addEventListener("input", pingTyping);
+    dom.composerTextarea.addEventListener("input", handleMentionInput);
     dom.composerTextarea.addEventListener("keydown", (event) => {
+      // Le menu de mentions intercepte d'abord (fleches/Entree/Echap) :
+      // jamais envoyer le message si l'utilisateur navigue dans le menu.
+      if (handleMentionKeydown(event)) return;
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         sendMessage();
       }
+    });
+    dom.composerTextarea.addEventListener("blur", () => {
+      // Delai court : laisse le temps a un clic sur un item du menu de
+      // s'executer (mousedown) avant que le blur ne le ferme.
+      setTimeout(() => closeMentionMenu(), 150);
     });
     dom.sendBtn.addEventListener("click", sendMessage);
   }

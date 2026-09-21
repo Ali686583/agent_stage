@@ -129,6 +129,10 @@ def _public_message(row: dict) -> dict:
         "resultId": row["result_id"],
         "replyToMessageId": reply_to_id,
         "replyTo": reply_to,
+        # Mentions "@" (discussions communes) : donnee structuree (userId +
+        # nom affiche courant), jamais juste du texte colore -- voir
+        # message_mentions en base et add_message ci-dessous.
+        "mentions": row.get("mentions") or [],
         "seq": row["seq"],
         "createdAt": row["created_at"].isoformat(),
     }
@@ -711,6 +715,7 @@ def add_message(
     action_id: str | None = None,
     result_id: str | None = None,
     reply_to_message_id: str | None = None,
+    mentioned_user_ids: list[str] | None = None,
     publish_extra: dict | None = None,
 ) -> dict:
     message_id = new_id("msg")
@@ -734,6 +739,16 @@ def add_message(
                 reply_to_message_id,
             ),
         )
+        # Deduplique (un meme utilisateur mentionne deux fois dans le texte
+        # ne cree qu'une seule ligne) sans jamais faire echouer l'envoi du
+        # message pour autant : voir la validation en amont dans
+        # workspace_routes.send_message_route, qui ne laisse passer que des
+        # participants reels de CETTE conversation.
+        for mentioned_user_id in dict.fromkeys(mentioned_user_ids or []):
+            conn.execute(
+                "INSERT INTO message_mentions (message_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (message_id, mentioned_user_id),
+            )
     created = get_message(message_id)
     try:
         # publish_extra (ex. requestId) n'est ajoute qu'a l'evenement temps
@@ -762,7 +777,13 @@ _MESSAGE_SELECT = """
     SELECT m.*, COALESCE(u.display_name, u.email) AS live_name, u.avatar_reference AS live_avatar,
            rt.author_name AS reply_to_author_name, rt.content AS reply_to_content, rt.role AS reply_to_role,
            COALESCE(ru.display_name, ru.email) AS reply_to_live_name,
-           EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.message_id = rt.id) AS reply_to_has_attachment
+           EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.message_id = rt.id) AS reply_to_has_attachment,
+           COALESCE(
+               (SELECT json_agg(json_build_object('userId', mm.user_id, 'displayName', COALESCE(mu.display_name, mu.email)))
+                FROM message_mentions mm LEFT JOIN users mu ON mu.id = mm.user_id
+                WHERE mm.message_id = m.id),
+               '[]'::json
+           ) AS mentions
     FROM messages m
     LEFT JOIN users u ON u.id = m.user_id
     LEFT JOIN messages rt ON rt.id = m.reply_to_message_id
@@ -829,26 +850,29 @@ def rename_conversation(conversation_id: str, user_id: str, title: str) -> dict:
     return get_conversation(conversation_id)
 
 
-def delete_conversation(conversation_id: str, user_id: str) -> bool:
+def delete_conversation(conversation_id: str, user_id: str, is_admin: bool = False) -> bool:
     """Supprime une conversation et tout ce qui lui est rattache (messages,
     pieces jointes, resultats, workflow_runs, associations aux projets) via
-    les contraintes ON DELETE CASCADE deja definies sur ces tables. Seul le
-    createur peut supprimer. Renvoie False si la conversation n'existe pas."""
+    les contraintes ON DELETE CASCADE deja definies sur ces tables. Renvoie
+    False si la conversation n'existe pas.
+
+    Une conversation commune (is_shared) n'appartient a personne en
+    particulier, mais peut desormais etre supprimee explicitement par son
+    createur d'origine ou un administrateur (meme regle que
+    connections_bank.delete_connection) -- jamais par un simple participant
+    quelconque, pour eviter de reproduire le bug deja observe en production
+    ou une conversation commune avait ete supprimee par megarde, effacant
+    son historique pour tout le monde. Le double garde-fou (createur/admin
+    + confirmation cote frontend) reste voulu."""
     with _db() as conn:
         row = conn.execute(
             "SELECT created_by_user_id, is_shared FROM conversations WHERE id = %s", (conversation_id,)
         ).fetchone()
         if not row:
             return False
-        # La conversation commune n'appartient a personne en particulier :
-        # meme son createur d'origine ne peut pas la supprimer pour tout le
-        # monde. Bug reel observe en production sans cette garde : elle a
-        # ete supprimee par megarde (elle apparaissait aussi dans la liste
-        # normale des discussions), effacant son historique pour tous les
-        # utilisateurs qui la partageaient.
-        if row["is_shared"]:
-            raise PermissionError("La conversation commune ne peut pas etre supprimee.")
-        if row["created_by_user_id"] != user_id:
+        if row["created_by_user_id"] != user_id and not is_admin:
+            if row["is_shared"]:
+                raise PermissionError("Seul le createur ou un administrateur peut supprimer cette conversation commune.")
             raise PermissionError("Seul le createur peut supprimer cette conversation.")
         conn.execute("DELETE FROM conversations WHERE id = %s", (conversation_id,))
     return True

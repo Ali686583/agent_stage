@@ -26,7 +26,7 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import connections_bank, google_drive, oauth_connector, platform_client, web_search, workflow_bank, workspace
+from librairies import chart_render, connections_bank, google_drive, oauth_connector, platform_client, web_search, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.security import sign_file_token
 from librairies.web_search import WebSearchError
@@ -453,6 +453,16 @@ def execute_workflow_run(
         prompt_text = _build_prompt_with_context(
             conversation_id, user_message_id, message_text, source_result_ids, reply_to_message_id
         )
+    # Politique de graphiques (voir librairies/chart_render.py) : injectee
+    # dans CHAQUE prompt, quelle que soit son origine (entry, bouton
+    # integre, ou resume Drive/veille web) -- un bouton/workflow qui a
+    # besoin d'un graphique n'a jamais a etre reecrit pour ca, l'IA voit
+    # toujours cette politique. Les workflows n8n PERSONNALISES (boutons
+    # existants avec leur propre prompt fige, qui n'interpolent pas tous
+    # {{ $json.body.prompt }}) recoivent en plus cette meme politique
+    # directement dans leur propre prompt (voir la mise a jour de ces
+    # workflows n8n, hors de ce depot).
+    prompt_text = f"{prompt_text}\n\n{chart_render.CHART_POLICY}"
 
     payload = {
         # Contrat minimal cote n8n : prompt/provider/conversationId/userId.
@@ -500,6 +510,20 @@ def execute_workflow_run(
     if not isinstance(blocks, list) or not blocks:
         _fail(run_id, conversation_id, user_message_id, request_id, "failed", "empty_response")
         return
+    # Extrait les graphiques Matplotlib eventuellement inclus par l'IA (voir
+    # chart_render.CHART_POLICY) : chaque bloc "markdown" est eclate en une
+    # sequence ordonnee texte/image la ou un ```chart_spec``` valide est
+    # trouve -- jamais deplace, jamais invente (une specification invalide
+    # laisse le texte original tel quel, voir split_markdown_into_blocks).
+    # Les autres types de blocs (table, chart Chart.js existant, etc.) ne
+    # sont jamais modifies.
+    expanded_blocks = []
+    for block in blocks:
+        if isinstance(block, dict) and block.get("type") == "markdown" and "```chart_spec" in (block.get("content") or ""):
+            expanded_blocks.extend(chart_render.split_markdown_into_blocks(block["content"]))
+        else:
+            expanded_blocks.append(block)
+    blocks = expanded_blocks
 
     # RÈGLE ABSOLUE (meme principe que connections_bank.py) : un secret MCP
     # dechiffre ne doit jamais etre persiste en base, meme si `payload` (qui
@@ -525,12 +549,17 @@ def execute_workflow_run(
         metadata=n8n_data.get("metadata"),
     )
 
+    # "content" (texte brut de repli, ex. apercu "en reponse a") ne doit
+    # jamais afficher le JSON brut d'un chart_spec -- remplace par un
+    # marqueur lisible, le rendu reel restant dans "blocks" ci-dessus.
+    plain_summary = chart_render.CHART_SPEC_FENCE_RE.sub("[Graphique]", str(n8n_data.get("summary", "")))
+
     workspace.add_message(
         conversation_id=conversation_id,
         user_id=None,
         author_name="ChatGPT" if model == "chatgpt" else "Claude",
         role="assistant",
-        content=str(n8n_data.get("summary", ""))[:2000],
+        content=plain_summary[:2000],
         blocks=blocks,
         model=model,
         action_id=action_id,

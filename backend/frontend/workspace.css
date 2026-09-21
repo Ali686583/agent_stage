@@ -60,6 +60,18 @@ html, body {
   overflow-y: auto;
 }
 
+/* Mention de copyright (voir NOTICE a la racine du depot pour le detail
+   juridique) : discrete, en bas de la barre laterale, n'entrave jamais
+   l'usage de l'application. */
+.sidebar-legal-footer {
+  margin-top: 12px;
+  padding: 8px 6px 2px;
+  font-size: 0.68rem;
+  color: var(--color-muted);
+  text-align: center;
+  opacity: 0.75;
+}
+
 /* Encoche en forme de trapeze aux angles arrondis (dessinee en SVG : un
    clip-path/border-radius CSS ne peut pas arrondir les coins d'un trapeze).
    La fleche est une couche par-dessus, seule a tourner selon l'etat
@@ -563,6 +575,56 @@ html, body {
 }
 .reply-preview-cancel:hover { color: var(--color-error); }
 
+/* Mentions "@" (discussions communes) : menu deroulant au-dessus du
+   composer (meme principe de positionnement que les autres menus flottants
+   de l'entry) + surlignage des mentions deja envoyees dans les messages. */
+.mention-menu {
+  position: absolute;
+  z-index: 40;
+  min-width: 220px;
+  max-width: 320px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-medium);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 4px;
+}
+.mention-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font-size: 0.84rem;
+  border-radius: var(--radius-small);
+  cursor: pointer;
+  text-align: start;
+}
+.mention-menu-item:hover,
+.mention-menu-item.active { background: var(--brand-green-mention-bg); }
+.mention-menu-empty { padding: 8px 10px; font-size: 0.8rem; color: var(--color-muted); }
+
+.mention-tag {
+  background: var(--brand-green-mention-bg);
+  color: var(--brand-green-text);
+  border-radius: 6px;
+  padding: 0 3px;
+  font-weight: 600;
+}
+/* La bulle de l'utilisateur est DEJA dans le vert de marque (voir
+   .message-row.user .message-bubble ci-dessous) : le surlignage vert
+   transparent standard y devient illisible (vert sur vert). Meme principe
+   ("vert de marque, transparence"), contraste adapte a ce fond precis. */
+.message-row.user .mention-tag {
+  background: rgba(255, 255, 255, 0.32);
+  color: var(--text-on-brand-green);
+}
+
 /* Lien de bas de discussion : "Telecharger la discussion en PDF" (mission
    §6), toujours le dernier element de la zone de conversation (voir
    ensureConversationFooter dans workspace.js). */
@@ -831,12 +893,10 @@ html, body {
   font-size: 0.82rem;
 }
 .model-selector button.active { background: var(--color-accent-soft-bg); color: var(--color-accent-text); }
-/* Mode "Message" (mission §4) : toujours teinte du meme vert que le logo
-   (--brand-green, voir theme.css), meme au repos -- pas seulement a l'etat
-   actif comme ChatGPT/Claude -- pour bien le distinguer visuellement des
-   deux providers IA. */
-.model-selector button[data-model="message"] { color: var(--brand-green-text); }
-.model-selector button[data-model="message"].active { background: var(--brand-green-soft-bg); }
+/* Mode "Message" (voir MESSAGE_MODEL dans workspace.js) : meme style que
+   ChatGPT/Claude, au repos comme a l'etat actif -- ce n'est qu'une 3e
+   option du meme selecteur segmente, jamais une teinte permanente qui le
+   distinguerait visuellement des deux providers IA. */
 
 .file-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .file-chip {

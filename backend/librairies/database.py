@@ -244,6 +244,24 @@ def _create_core_tables(conn) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages (reply_to_message_id);"
         )
+        # Mentions "@" dans les discussions communes : donnee STRUCTUREE liee
+        # a l'utilisateur mentionne (jamais juste du texte colore), pour
+        # pouvoir etre reutilisee plus tard (notifications, entre autres).
+        # Pas de FK sur user_id (meme raison que ci-dessus : un utilisateur
+        # supprime doit rester identifiable comme "mentionne" dans l'historique
+        # plutot que de faire disparaitre silencieusement la mention).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_mentions (
+                message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+                user_id    TEXT NOT NULL,
+                PRIMARY KEY (message_id, user_id)
+            );
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_message_mentions_user ON message_mentions (user_id);"
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS files (

@@ -15,6 +15,11 @@
   --brand-green-text: #487920;       /* contraste 5.2:1 sur fond blanc (AA) */
   --brand-green-soft-bg: #f0f7f1;
   --text-on-brand-green: #1a1a1a;    /* contraste 7.1:1 sur --brand-green */
+  /* Surlignage d'une mention "@Nom" (voir .mention-tag dans workspace.css) :
+     meme vert de marque, transparence pour rester discret sur un fond de
+     bulle de message clair OU sombre (texte : --brand-green-text, deja au
+     bon contraste dans les deux themes). */
+  --brand-green-mention-bg: rgba(109, 184, 49, 0.18);
 
   --color-bg: #ffffff;
   --color-text: #1a1a1a;
@@ -50,6 +55,7 @@
   --brand-green-hover: #7fcf3f;
   --brand-green-text: #85CF4A;       /* contraste 9.8:1 sur --color-bg sombre */
   --brand-green-soft-bg: #1c2b17;
+  --brand-green-mention-bg: rgba(133, 207, 74, 0.22);
 
   --color-bg: #121212;
   --color-text: #f2f2f2;
