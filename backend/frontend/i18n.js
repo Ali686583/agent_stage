@@ -1,6 +1,6 @@
 // Traduction FR / EN / AR : persistance locale + application sur les
 // elements marques [data-i18n], [data-i18n-placeholder] et [data-i18n-aria].
-// Le nom "OCPAgentic" n'est jamais traduit : ce n'est qu'une image (logo.png)
+// Le nom "SPSAgentic" n'est jamais traduit : ce n'est qu'une image (logo.png)
 // avec un attribut alt fixe, jamais du texte gere par ce systeme.
 (function () {
   const STORAGE_KEY = "agentStageLang";

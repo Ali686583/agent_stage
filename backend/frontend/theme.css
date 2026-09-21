@@ -2,24 +2,24 @@
 
 :root {
   /* ===== Vert de marque : source de verite unique =====
-     --brand-green est la couleur EXACTE extraite du logo OCPAgentic
-     (median des pixels verts de animation.gif/logo.png). Toute variante
-     (hover, texte, fond doux) est DERIVEE de cette meme teinte/saturation
-     (seule la luminosite change), jamais une nuance de vert choisie a part -
-     voir le calcul de contraste documente au moment de leur ajout.
-     Les anciens noms --color-accent* restent en place (utilises dans tout
-     le CSS existant) mais pointent maintenant vers ces tokens de marque :
-     un seul systeme, pas de variante parallele. */
-  --brand-green: #6DB831;
-  --brand-green-hover: #5FA12B;
-  --brand-green-text: #487920;       /* contraste 5.2:1 sur fond blanc (AA) */
-  --brand-green-soft-bg: #f0f7f1;
-  --text-on-brand-green: #1a1a1a;    /* contraste 7.1:1 sur --brand-green */
+     --brand-green est la couleur EXACTE extraite du nouveau logo SPSAgentic
+     (pixel le plus sature du fichier fourni, voir animation.gif/logo.png).
+     Toute variante (hover, texte, fond doux) est DERIVEE de cette meme
+     teinte/saturation (seule la luminosite change), jamais une nuance de
+     vert choisie a part - voir le calcul de contraste documente au moment
+     de leur ajout. Les anciens noms --color-accent* restent en place
+     (utilises dans tout le CSS existant) mais pointent maintenant vers ces
+     tokens de marque : un seul systeme, pas de variante parallele. */
+  --brand-green: #56AE52;
+  --brand-green-hover: #489345;
+  --brand-green-text: #3C7A39;       /* contraste 5.2:1 sur fond blanc (AA) */
+  --brand-green-soft-bg: #F3F9F3;
+  --text-on-brand-green: #1a1a1a;    /* contraste 6.3:1 sur --brand-green */
   /* Surlignage d'une mention "@Nom" (voir .mention-tag dans workspace.css) :
      meme vert de marque, transparence pour rester discret sur un fond de
      bulle de message clair OU sombre (texte : --brand-green-text, deja au
      bon contraste dans les deux themes). */
-  --brand-green-mention-bg: rgba(109, 184, 49, 0.18);
+  --brand-green-mention-bg: rgba(86, 174, 82, 0.18);
 
   --color-bg: #ffffff;
   --color-text: #1a1a1a;
@@ -52,10 +52,10 @@
 :root[data-theme="dark"] {
   /* Meme teinte de marque, luminosite adaptee pour un contraste correct
      sur fond sombre (vert plus clair pour le texte, cf. commentaire ci-dessus). */
-  --brand-green-hover: #7fcf3f;
-  --brand-green-text: #85CF4A;       /* contraste 9.8:1 sur --color-bg sombre */
-  --brand-green-soft-bg: #1c2b17;
-  --brand-green-mention-bg: rgba(133, 207, 74, 0.22);
+  --brand-green-hover: #7FC27C;
+  --brand-green-text: #8CC88A;       /* contraste 9.6:1 sur --color-bg sombre */
+  --brand-green-soft-bg: #142A14;
+  --brand-green-mention-bg: rgba(140, 200, 138, 0.22);
 
   --color-bg: #121212;
   --color-text: #f2f2f2;

@@ -127,7 +127,7 @@
         startY: state.y,
         margin: { left: MARGIN + indent, right: MARGIN },
         styles: { fontSize: 9, cellPadding: 2 },
-        headStyles: { fillColor: [109, 184, 49], textColor: [255, 255, 255] },
+        headStyles: { fillColor: [86, 174, 82], textColor: [255, 255, 255] },
         theme: "grid",
       });
       state.y = doc.lastAutoTable.finalY + 4;
