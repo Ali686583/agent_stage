@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 
 import redis
 
@@ -75,6 +77,51 @@ def _record_chained_file(run_id: str, requested_file_id: str, new_file_id: str) 
     _client.hset(key, requested_file_id, new_file_id)
     _client.hset(key, new_file_id, new_file_id)  # identite : un id deja "a jour" se resout vers lui-meme
     _client.expire(key, _PENDING_TTL_SECONDS)
+
+
+def _run_lock_key(run_id: str) -> str:
+    return f"excel-run-lock:{run_id}"
+
+
+def _acquire_run_lock(run_id: str, timeout_seconds: float = 25.0) -> str | None:
+    """Verrou Redis (SET NX EX) qui serialise les appels edit_excel d'un MEME
+    run_id -- necessaire car l'executeur d'outils de l'Agent (n8n/LangChain)
+    peut envoyer PLUSIEURS appels edit_excel EN PARALLELE des qu'un seul tour
+    du modele contient plusieurs tool_calls (constate sur une execution n8n
+    reelle, includeData=true : les 3 appels d'un meme tour partageaient
+    exactement le meme startTime). Sans ce verrou, la redirection de
+    chainage (_resolve_chained_file_id/_record_chained_file, cf. plus haut)
+    ne suffit pas : chaque appel concurrent lit l'etat AVANT que les autres
+    n'aient eu le temps d'enregistrer leur propre resultat, donc tous
+    continuent d'operer en parallele sur le fichier ORIGINAL. Le verrou force
+    les appels concurrents a s'executer un par un, dans l'ordre ou ils
+    parviennent reellement au serveur -- suffisant ici car les OPERATIONS
+    elles-memes (indices de colonne, plages...) sont statiques (decidees par
+    le modele en un seul coup, sans dependre du contenu intermediaire) ;
+    seul le FICHIER sur lequel elles s'appliquent doit etre correctement
+    enchaine. Renvoie None (jamais d'exception) si Redis est indisponible ou
+    si le verrou n'a pas pu etre obtenu a temps -- l'appelant continue alors
+    sans verrou plutot que d'echouer l'edition."""
+    if _client is None:
+        return None
+    token = uuid.uuid4().hex
+    key = _run_lock_key(run_id)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if _client.set(key, token, nx=True, ex=30):
+            return token
+        time.sleep(0.15)
+    return None
+
+
+def _release_run_lock(run_id: str, token: str | None) -> None:
+    if _client is None or not token:
+        return
+    key = _run_lock_key(run_id)
+    # Ne supprime que si on detient encore le verrou (evite de supprimer le
+    # verrou d'un autre appel si le notre a deja expire entre-temps).
+    if _client.get(key) == token:
+        _client.delete(key)
 
 
 def register_session(session_id: str, user_id: str, run_id: str) -> None:
@@ -207,17 +254,28 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     operation = (arguments or {}).get("operation") or {}
     if not requested_file_id:
         return {"content": [{"type": "text", "text": "edit_excel error: fileId is required."}], "isError": True}
-    # Redirection automatique de chainage -- voir _resolve_chained_file_id.
-    file_id = _resolve_chained_file_id(context["runId"], requested_file_id)
-    try:
-        result = excel_tool.apply_edit(file_id, context["userId"], sheet_name, operation)
-    except excel_tool.ExcelToolError as exc:
-        return {"content": [{"type": "text", "text": f"edit_excel failed: {exc}"}], "isError": True}
-    except Exception as exc:
-        return {"content": [{"type": "text", "text": f"edit_excel failed (unexpected error): {str(exc)[:200]}"}], "isError": True}
 
-    push_pending_file(context["runId"], result["newFileId"])
-    _record_chained_file(context["runId"], requested_file_id, result["newFileId"])
+    run_id = context["runId"]
+    # Verrou + redirection automatique de chainage -- voir
+    # _acquire_run_lock/_resolve_chained_file_id : necessaire des que le
+    # modele demande plusieurs modifications dependantes dans le meme tour,
+    # car l'Agent envoie alors ces appels EN PARALLELE (confirme en test E2E
+    # reel), donc seul le verrou garantit que chaque appel voit le resultat
+    # REEL du precedent avant de choisir son propre fichier de depart.
+    lock_token = _acquire_run_lock(run_id)
+    try:
+        file_id = _resolve_chained_file_id(run_id, requested_file_id)
+        try:
+            result = excel_tool.apply_edit(file_id, context["userId"], sheet_name, operation)
+        except excel_tool.ExcelToolError as exc:
+            return {"content": [{"type": "text", "text": f"edit_excel failed: {exc}"}], "isError": True}
+        except Exception as exc:
+            return {"content": [{"type": "text", "text": f"edit_excel failed (unexpected error): {str(exc)[:200]}"}], "isError": True}
+
+        push_pending_file(run_id, result["newFileId"])
+        _record_chained_file(run_id, requested_file_id, result["newFileId"])
+    finally:
+        _release_run_lock(run_id, lock_token)
     chain_note = (
         f" (poursuite automatique sur le dernier resultat de ce fichier dans cette conversation, "
         f"{file_id}, plutot que sur {requested_file_id})"
