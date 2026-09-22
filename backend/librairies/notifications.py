@@ -70,6 +70,13 @@ def _public_notification(row: dict) -> dict:
         "seq": row["seq"],
         "type": row["type"],
         "actorUserId": row.get("actor_user_id"),
+        # Bug trouve en test E2E : le frontend (notificationRowLabel,
+        # workspace.js) affiche "{name} vous a tague" / "{name} a repondu...",
+        # mais sans ce JOIN seul actorUserId (un id opaque) etait renvoye --
+        # le nom restait toujours vide dans le popover. COALESCE reprend
+        # exactement la regle de database.display_name_for (pseudonyme sinon
+        # email), jamais dupliquee differemment ici.
+        "actorName": row.get("actor_name"),
         "conversationId": row.get("conversation_id"),
         "messageId": row.get("message_id"),
         "previewText": row.get("preview_text"),
@@ -79,15 +86,19 @@ def _public_notification(row: dict) -> dict:
 
 
 def list_notifications(user_id: str, *, before: str | None = None, limit: int = 30) -> list[dict]:
-    clauses = ["recipient_user_id = %(user_id)s"]
+    clauses = ["n.recipient_user_id = %(user_id)s"]
     params: dict = {"user_id": user_id, "limit": min(max(limit, 1), 100)}
     if before:
-        clauses.append("created_at < %(before)s")
+        clauses.append("n.created_at < %(before)s")
         params["before"] = before
     where_sql = " AND ".join(clauses)
     with _db() as conn:
         rows = conn.execute(
-            f"SELECT * FROM notifications WHERE {where_sql} ORDER BY created_at DESC LIMIT %(limit)s",
+            f"""SELECT n.*, COALESCE(u.display_name, u.email) AS actor_name
+                FROM notifications n
+                LEFT JOIN users u ON u.id = n.actor_user_id
+                WHERE {where_sql}
+                ORDER BY n.created_at DESC LIMIT %(limit)s""",
             params,
         ).fetchall()
     return [_public_notification(r) for r in rows]
