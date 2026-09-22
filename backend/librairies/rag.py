@@ -235,7 +235,7 @@ def _public_document(row: dict) -> dict:
 
 
 def list_visible_documents(
-    user_id: str, *, search: str | None = None, limit: int = 30, before: str | None = None, is_admin: bool = False
+    user_id: str, *, search: str | None = None, limit: int = 30, before: str | None = None
 ) -> list[dict]:
     """Liste "Documentation" (mission §7) : reutilise la MEME regle d'ACCES
     que search_documents (_ACCESS_SQL) -- jamais de derive entre "qui peut
@@ -283,11 +283,15 @@ def list_visible_documents(
             "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
             "updatedAt": r["updated_at"].isoformat() if r.get("updated_at") else None,
             "isOwner": r["owner_user_id"] == user_id,
-            # Determine cote serveur (jamais au frontend de decider tout
-            # seul qui peut gerer quoi) : proprietaire OU admin -- meme
-            # bypass que user_can_manage_document, expose ici pour que
-            # renderDocumentRow n'ait qu'a lire un seul champ.
-            "canManage": r["owner_user_id"] == user_id or is_admin,
+            # Decision produit : voir un document dans la Documentation ==
+            # pouvoir le gerer (renommer/supprimer/reindexer). Cette requete
+            # a deja filtre sur _ACCESS_SQL, donc toute ligne listee ici est
+            # par definition geree par cet utilisateur -- toujours True.
+            # Champ conserve (plutot qu'un simple isVisible implicite) pour
+            # que le frontend n'ait qu'a lire un seul booleen, et pour
+            # documenter explicitement la regle au lieu de la laisser
+            # implicite.
+            "canManage": True,
         }
         for r in rows
     ]
@@ -299,24 +303,21 @@ def rename_document(document_id: str, name: str) -> dict | None:
     return get_document(document_id)
 
 
-def user_can_manage_document(document_id: str, user_id: str, is_admin: bool = False) -> bool:
-    """Rename/supprime/reindexe : le proprietaire, OU un admin applicatif
-    (§7, "avec autorisation explicite"). Volontairement PLUS strict que la
-    simple visibilite (un participant de conversation peut LIRE un document
-    sans pouvoir le supprimer) -- mais aligne sur le meme bypass admin deja
-    utilise partout ailleurs dans l'app pour la moderation (conversations,
-    action-bank, connections : `user.get("role") == "admin"`, voir
-    workspace.delete_conversation/connections_bank.delete_connection).
-    Documentation etait jusqu'ici la seule ressource supprimable SANS ce
-    bypass -- ajoute ici pour ne pas diverger (bug trouve en usage reel :
-    l'admin ne pouvait pas nettoyer les documents de test d'autres comptes)."""
-    if is_admin:
-        with _db() as conn:
-            row = conn.execute("SELECT 1 FROM documents WHERE id = %s", (document_id,)).fetchone()
-        return bool(row)
+def user_can_manage_document(document_id: str, user_id: str) -> bool:
+    """Rename/supprime/reindexe : decision explicite du produit (demande
+    directement par l'utilisateur) -- QUICONQUE PEUT VOIR un document dans sa
+    Documentation peut aussi le gerer, sans notion de "proprietaire" ni de
+    role admin special. Reutilise donc EXACTEMENT la meme regle d'ACCES que
+    le listing (_ACCESS_SQL) : jamais une deuxieme semantique de permission
+    qui pourrait diverger de ce que l'utilisateur voit reellement dans la
+    modale Documentation. Un document qu'on ne peut pas voir reste, lui,
+    totalement hors de portee (meme regle qu'avant sur ce point)."""
     with _db() as conn:
-        row = conn.execute("SELECT owner_user_id FROM documents WHERE id = %s", (document_id,)).fetchone()
-    return bool(row) and row["owner_user_id"] == user_id
+        row = conn.execute(
+            f"SELECT 1 FROM documents d WHERE d.id = %(document_id)s AND {_ACCESS_SQL}",
+            {"document_id": document_id, "user_id": user_id},
+        ).fetchone()
+    return bool(row)
 
 
 def delete_document(document_id: str) -> bool:

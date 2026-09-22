@@ -3591,14 +3591,12 @@
         onclick: () => window.open(`${API}/files/${doc.id}`, "_blank"),
       })
     );
-    // canManage = proprietaire OU admin (calcule cote serveur, voir
-    // rag.list_visible_documents) -- avant, seul isOwner etait teste ici,
-    // donc un admin ne pouvait ni renommer ni reindexer ni SUPPRIMER un
-    // document appartenant a un autre compte depuis la Documentation
-    // (bug releve en usage reel : boutons absents pour nettoyer les
-    // documents d'autres comptes). Les routes backend acceptaient deja le
-    // meme bypass admin que partout ailleurs (conversations, action-bank,
-    // connections) -- seul le frontend n'exposait pas les boutons.
+    // canManage : decision produit explicite (demandee directement) --
+    // quiconque peut VOIR un document dans sa Documentation peut aussi le
+    // gerer (renommer/reindexer/supprimer), sans notion de proprietaire ni
+    // de role admin special. Calcule cote serveur (toujours True pour une
+    // ligne listee ici, cf. rag.list_visible_documents/user_can_manage_document)
+    // -- jamais une deuxieme regle derivee ici.
     if (doc.canManage) {
       actions.appendChild(
         el("button", {
