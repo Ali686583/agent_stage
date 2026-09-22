@@ -46,7 +46,7 @@ import requests
 
 from librairies.database import _db
 from librairies.security import sign_file_token
-from librairies.workspace import new_id
+from librairies.workspace import delete_files, new_id
 
 # Bug trouve en test E2E reel : le web (gunicorn, server.py::database.init_db)
 # et le worker RQ (qui n'appelle JAMAIS init_db -- rien dans rag_jobs.py ne le
@@ -321,10 +321,29 @@ def user_can_manage_document(document_id: str, user_id: str) -> bool:
 
 
 def delete_document(document_id: str) -> bool:
-    """Cascade geree par Postgres (document_chunks.document_id ON DELETE
-    CASCADE, mission §4e) : une seule suppression suffit a rendre le
-    document et tous ses chunks immediatement introuvables, y compris pour
-    le RAG (evalue a la requete, jamais un cache a invalider)."""
+    """Suppression REELLE, pour tout le monde (decision produit explicite,
+    demandee directement) : ne se contente PAS de retirer l'indexation RAG
+    -- supprime le FICHIER sous-jacent (`files`), qui cascade en base vers
+    tout ce qui en depend :
+      - documents.file_id ON DELETE CASCADE -> cette ligne documents (et
+        donc document_chunks.document_id ON DELETE CASCADE, mission §4e) ;
+      - message_attachments.file_id ON DELETE CASCADE -> la piece jointe
+        correspondante DISPARAIT du message d'origine pour TOUS les
+        participants de la conversation, pas seulement de la Documentation.
+    Avant ce changement, un document "supprime" ici restait telechargeable
+    via sa piece jointe d'origine dans le fil de discussion -- pas une
+    vraie suppression au sens attendu par l'utilisateur.
+    Repli defensif (ne devrait pas arriver en usage normal, file_id est
+    toujours renseigne a la creation) : si le document n'a pas de fichier
+    associe, on supprime uniquement la ligne `documents`."""
+    with _db() as conn:
+        row = conn.execute("SELECT file_id FROM documents WHERE id = %s", (document_id,)).fetchone()
+    if not row:
+        return False
+    file_id = row["file_id"]
+    if file_id:
+        delete_files([file_id])
+        return True
     with _db() as conn:
         cur = conn.execute("DELETE FROM documents WHERE id = %s", (document_id,))
     return cur.rowcount > 0
