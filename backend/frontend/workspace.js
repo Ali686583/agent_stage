@@ -3465,7 +3465,12 @@
 
   function openNotificationsMenu() {
     closeContextMenu();
-    const menu = el("div", { class: "item-context-menu open open-up notifications-menu" });
+    // Correctif trouve en test E2E : PAS "open-up" ici -- ce menu est
+    // ancre a la cloche du bandeau superieur (topbar), tout en haut de
+    // l'ecran ; "open-up" (pense pour les menus proches du bas, ex.
+    // connexions dans le composer) le faisait s'ouvrir hors ecran vers le
+    // haut (top negatif). Ouverture par defaut (top:100%, vers le bas).
+    const menu = el("div", { class: "item-context-menu open notifications-menu" });
     const header = el("div", { class: "notifications-menu-header" }, [
       el("h3", { text: t("workspace.notifications_title") }),
       el("button", {
