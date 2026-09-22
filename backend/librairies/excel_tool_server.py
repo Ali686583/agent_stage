@@ -14,14 +14,11 @@ liste Redis a courte duree de vie, indexee par run_id (mission §5.3).
 from __future__ import annotations
 
 import json
-import logging
 import os
 
 import redis
 
 from librairies import excel_tool
-
-_logger = logging.getLogger(__name__)
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
 _PENDING_TTL_SECONDS = int(os.environ.get("FILE_LINK_TTL_SECONDS", "600"))
@@ -101,23 +98,22 @@ _EDIT_EXCEL_TOOL = {
         "will see as a downloadable attachment automatically. Include the operation's summary and the "
         "returned preview table in your reply ; never claim a modification succeeded if this tool returned "
         "isError: true.\n\n"
-        "The 'operation' argument is a JSON object whose 'type' field selects one of the following shapes "
-        "(EXACT field names below, all fields other than 'type' are required unless marked optional -- pick "
-        "exactly one shape and include ONLY its fields, never mix fields from different shapes):\n"
-        '  {"type": "set_cell", "cell": "B2", "value": 42}\n'
-        '  {"type": "set_range", "range": "A1:B2", "values": [[1,2],[3,4]]}\n'
-        '  {"type": "add_column", "header": "Marge", "formula": "=B{row}-C{row}", "startRow": 2 (optional, default 2)}\n'
-        '  {"type": "delete_column", "column": "C"}\n'
-        '  {"type": "add_row", "values": ["Widget D", 80, 40], "atRow": 5 (optional, appends if omitted)}\n'
-        '  {"type": "delete_row", "row": 5}\n'
-        '  {"type": "add_sheet", "name": "Nouvelle feuille"}\n'
-        '  {"type": "rename_sheet", "oldName": "Sheet1", "newName": "Ventes"}\n'
-        '  {"type": "delete_sheet", "name": "Ventes"}\n'
-        '  {"type": "write_formula", "cell": "D2", "formula": "=B2-C2"} (or "range" instead of "cell" for multiple rows)\n'
-        '  {"type": "copy_range", "sourceRange": "A1:B3", "destCell": "D1"}\n'
-        '  {"type": "sort_range", "range": "A1:C10", "keyColumn": 2, "ascending": true (optional, default true), "hasHeader": true (optional, default true)}\n'
-        '  {"type": "filter_rows", "range": "A1:C10", "column": 2, "operator": "gt", "value": 100, "hasHeader": true (optional, default true)} -- operator is one of eq|contains|gt|lt\n'
-        '  {"type": "clear_range", "range": "A1:B2"}\n'
+        "'operation.type' selects which of operation's other fields are required -- ALWAYS include every "
+        "field listed as required for the chosen type, never only 'type' alone:\n"
+        "  set_cell: requires cell, value\n"
+        "  set_range: requires range, values\n"
+        "  add_column: requires header (optional: formula, startRow)\n"
+        "  delete_column: requires column\n"
+        "  add_row: requires values (optional: atRow)\n"
+        "  delete_row: requires row\n"
+        "  add_sheet: requires name\n"
+        "  rename_sheet: requires oldName, newName\n"
+        "  delete_sheet: requires name\n"
+        "  write_formula: requires formula, and either cell or range\n"
+        "  copy_range: requires sourceRange, destCell\n"
+        "  sort_range: requires range, keyColumn (optional: ascending, hasHeader)\n"
+        "  filter_rows: requires range, column, operator, value (optional: hasHeader)\n"
+        "  clear_range: requires range\n"
         "'formula' values may use the literal placeholder {row} for the current row number, e.g. \"=B{row}-C{row}\"."
     ),
     "inputSchema": {
@@ -127,8 +123,37 @@ _EDIT_EXCEL_TOOL = {
             "sheetName": {"type": "string", "description": "Target sheet name. Omit to use the active/first sheet."},
             "operation": {
                 "type": "object",
-                "description": "See the tool description above for the exact shape per operation type.",
-                "properties": {"type": {"type": "string"}},
+                "description": "See the field-by-field requirements in the tool description above.",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": [
+                            "set_cell", "set_range", "add_column", "delete_column", "add_row", "delete_row",
+                            "add_sheet", "rename_sheet", "delete_sheet", "write_formula", "copy_range",
+                            "sort_range", "filter_rows", "clear_range",
+                        ],
+                        "description": "Which operation to perform. Determines which other fields below are required.",
+                    },
+                    "cell": {"type": "string", "description": "Cell reference (e.g. 'B2'). Required for set_cell ; alternative to 'range' for write_formula."},
+                    "value": {"description": "Value to write (any JSON scalar). Required for set_cell. Also required for filter_rows (the value to compare each cell against)."},
+                    "range": {"type": "string", "description": "Range reference (e.g. 'A1:C10'). Required for set_range, sort_range, filter_rows, clear_range ; alternative to 'cell' for write_formula."},
+                    "values": {"type": "array", "description": "For set_range: a 2D array of row values, e.g. [[1,2],[3,4]]. For add_row: a flat array of values for the new row."},
+                    "header": {"type": "string", "description": "New column's header text. Required for add_column."},
+                    "formula": {"type": "string", "description": "Excel formula string, may use the placeholder {row}, e.g. '=B{row}-C{row}'. Required for write_formula ; optional for add_column (a computed column without a formula just gets the header)."},
+                    "startRow": {"type": "integer", "description": "First data row to compute for add_column. Optional, defaults to 2 (row 1 is assumed to be the header row)."},
+                    "column": {"type": "string", "description": "For delete_column: the column LETTER to delete (e.g. 'C'). For filter_rows: the 1-based column NUMBER within 'range' to filter on (e.g. 2, never a letter)."},
+                    "atRow": {"type": "integer", "description": "Row index to insert the new row at, for add_row. Optional -- appends at the end if omitted."},
+                    "row": {"type": "integer", "description": "Row index. Required for delete_row."},
+                    "name": {"type": "string", "description": "Sheet name. Required for add_sheet (the new sheet's name) and delete_sheet (the sheet to delete)."},
+                    "oldName": {"type": "string", "description": "Existing sheet name to rename. Required for rename_sheet."},
+                    "newName": {"type": "string", "description": "New name for the sheet. Required for rename_sheet."},
+                    "sourceRange": {"type": "string", "description": "Range to copy from. Required for copy_range."},
+                    "destCell": {"type": "string", "description": "Top-left destination cell to copy into. Required for copy_range."},
+                    "keyColumn": {"type": "integer", "description": "1-based column number within 'range' to sort by. Required for sort_range."},
+                    "ascending": {"type": "boolean", "description": "Sort direction for sort_range. Optional, defaults to true."},
+                    "hasHeader": {"type": "boolean", "description": "Whether the first row of 'range' is a header row to keep in place. Optional, defaults to true. Used by sort_range and filter_rows."},
+                    "operator": {"type": "string", "enum": ["eq", "contains", "gt", "lt"], "description": "Comparison used by filter_rows between each row's 'column' cell and 'value'."},
+                },
                 "required": ["type"],
             },
         },
@@ -144,19 +169,6 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     file_id = str((arguments or {}).get("fileId") or "").strip()
     sheet_name = (arguments or {}).get("sheetName")
     operation = (arguments or {}).get("operation") or {}
-    # Diagnostic temporaire (bug en cours d'investigation, test E2E reel) :
-    # logging.warning() n'est pas capte par Railway ici (confirme : aucune
-    # trace n'apparait meme pour des erreurs certaines) -- on renvoie donc
-    # la forme EXACTE recue directement dans la reponse de l'outil,
-    # recuperable via l'API d'executions n8n. A retirer une fois la cause
-    # confirmee.
-    if os.environ.get("EXCEL_TOOL_DEBUG"):
-        import json as _json
-
-        return {
-            "content": [{"type": "text", "text": f"DEBUG arguments={_json.dumps(arguments, ensure_ascii=False)} type_operation={type(operation).__name__}"}],
-            "isError": True,
-        }
     if not file_id:
         return {"content": [{"type": "text", "text": "edit_excel error: fileId is required."}], "isError": True}
     try:
