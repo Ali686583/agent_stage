@@ -28,9 +28,12 @@ participant REEL de la conversation a laquelle il est rattache (meme
 semantique que workspace.is_participant, mais lue directement en SQL ici
 pour un filtrage a la source, sans effet de bord d'auto-inscription). Un
 document "standalone" n'est visible que pour son proprietaire, ou si
-`is_shared = true`. Le meme helper (`_VISIBILITY_SQL`) est reutilise pour la
-liste "Documentation" (workspace_routes.py) : les deux ne doivent jamais
-diverger.
+`is_shared = true`. Le meme helper d'ACCES (`_ACCESS_SQL`) est reutilise pour
+la liste "Documentation" (workspace_routes.py) : les deux ne doivent jamais
+diverger sur QUI peut voir/recuperer un document. Seule la recuperation RAG
+ajoute en plus `status = 'READY'` (`_VISIBILITY_SQL`) -- la liste
+Documentation montre sciemment aussi les documents pas encore indexes ou en
+echec (mission §17/18).
 """
 
 from __future__ import annotations
@@ -60,8 +63,19 @@ _CHUNK_OVERLAP = 150
 # listing "Documentation" (workspace_routes.py::list_documents_route) --
 # jamais deux definitions qui pourraient diverger (§4c/§7, "listing et RAG ne
 # doivent jamais diverger"). `%(user_id)s` est le seul parametre attendu.
-_VISIBILITY_SQL = """
-    d.status = 'READY' AND (
+# ATTENTION : ce clause ne couvre QUE l'acces (proprietaire / partage /
+# participant) -- jamais le statut d'indexation. Corrige apres un bug trouve
+# en test E2E reel : la premiere version incluait `d.status = 'READY'` ici,
+# ce qui faisait disparaitre un document de la liste Documentation tant
+# qu'il n'etait pas encore indexe (UPLOADED/PROCESSING) ou si son indexation
+# avait echoue (FAILED) -- alors meme que l'UI Documentation a ses propres
+# badges de statut pour ces cas (mission §17/18, l'utilisateur doit
+# justement pouvoir VOIR qu'un document est en cours ou en echec). Seule la
+# RECUPERATION RAG (search_documents, qui a besoin de chunks reellement
+# indexes) doit encore filtrer sur status='READY' -- voir son usage
+# ci-dessous, qui ajoute cette condition separement.
+_ACCESS_SQL = """
+    (
         (d.source_type = 'attachment' AND (
             d.owner_user_id = %(user_id)s
             OR (d.conversation_id IS NOT NULL AND (
@@ -78,6 +92,9 @@ _VISIBILITY_SQL = """
         OR (d.source_type = 'standalone' AND (d.owner_user_id = %(user_id)s OR d.is_shared = true))
     )
 """
+# Alias conserve pour compatibilite de lecture : la recuperation RAG doit
+# TOUJOURS filtrer sur les deux conditions (acces ET indexe).
+_VISIBILITY_SQL = f"d.status = 'READY' AND {_ACCESS_SQL}"
 
 
 class RagError(RuntimeError):
@@ -163,16 +180,18 @@ def _public_document(row: dict) -> dict:
 
 
 def list_visible_documents(user_id: str, *, search: str | None = None, limit: int = 30, before: str | None = None) -> list[dict]:
-    """Liste "Documentation" (mission §7) : reutilise EXACTEMENT le meme
-    filtre d'autorisation que search_documents (voir _VISIBILITY_SQL) --
-    jamais de derive entre "ce que la Documentation montre" et "ce que le
-    RAG peut recuperer". Metadonnees uniquement (jamais extracted_text,
-    §7 "ne jamais charger tout le contenu pour un simple listing"). Curseur
-    de pagination : `before` est le `createdAt` ISO du dernier element de la
-    page precedente (created_at n'est pas strictement monotone a la
-    microseconde pres, mais suffisant ici -- pas de suppression/insertion
-    concurrente a haute frequence attendue sur ce listing)."""
-    clauses = [_VISIBILITY_SQL]
+    """Liste "Documentation" (mission §7) : reutilise la MEME regle d'ACCES
+    que search_documents (_ACCESS_SQL) -- jamais de derive entre "qui peut
+    voir ce document dans la bibliotheque" et "qui peut le recuperer via le
+    RAG". Contrairement a search_documents, n'exige PAS status='READY' : un
+    document UPLOADED/PROCESSING/FAILED doit rester visible ici (avec son
+    badge de statut, voir workspace.js renderDocumentRow) pour que
+    l'utilisateur voie qu'il est en cours d'indexation ou en echec -- seule
+    la recuperation de chunks reels a besoin d'un index pret. Metadonnees
+    uniquement (jamais extracted_text, §7 "ne jamais charger tout le contenu
+    pour un simple listing"). Curseur de pagination : `before` est le
+    `createdAt` ISO du dernier element de la page precedente."""
+    clauses = [_ACCESS_SQL]
     params: dict = {"user_id": user_id}
     if search:
         clauses.append("d.name ILIKE %(search)s")
