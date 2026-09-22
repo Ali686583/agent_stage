@@ -145,10 +145,18 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     sheet_name = (arguments or {}).get("sheetName")
     operation = (arguments or {}).get("operation") or {}
     # Diagnostic temporaire (bug en cours d'investigation, test E2E reel) :
-    # l'Agent semble envoyer 'header' mais le handler ne le voit pas --
-    # log la forme EXACTE recue pour trancher entre bug serveur et
-    # serialisation cote n8n. A retirer une fois le diagnostic termine.
-    _logger.warning("edit_excel DEBUG arguments=%r operation=%r type(operation)=%s", arguments, operation, type(operation))
+    # logging.warning() n'est pas capte par Railway ici (confirme : aucune
+    # trace n'apparait meme pour des erreurs certaines) -- on renvoie donc
+    # la forme EXACTE recue directement dans la reponse de l'outil,
+    # recuperable via l'API d'executions n8n. A retirer une fois la cause
+    # confirmee.
+    if os.environ.get("EXCEL_TOOL_DEBUG"):
+        import json as _json
+
+        return {
+            "content": [{"type": "text", "text": f"DEBUG arguments={_json.dumps(arguments, ensure_ascii=False)} type_operation={type(operation).__name__}"}],
+            "isError": True,
+        }
     if not file_id:
         return {"content": [{"type": "text", "text": "edit_excel error: fileId is required."}], "isError": True}
     try:
