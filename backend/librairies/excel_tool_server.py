@@ -124,6 +124,25 @@ def _release_run_lock(run_id: str, token: str | None) -> None:
         _client.delete(key)
 
 
+_LAST_RESULT_SENTINEL = "LAST_RESULT"
+
+
+def _last_result_key(run_id: str) -> str:
+    return f"excel-last-result:{run_id}"
+
+
+def _get_last_result(run_id: str) -> str | None:
+    if _client is None:
+        return None
+    return _client.get(_last_result_key(run_id))
+
+
+def _set_last_result(run_id: str, file_id: str) -> None:
+    if _client is None:
+        return
+    _client.setex(_last_result_key(run_id), _PENDING_TTL_SECONDS, file_id)
+
+
 def register_session(session_id: str, user_id: str, run_id: str) -> None:
     if _client is None:
         return
@@ -179,7 +198,12 @@ _EDIT_EXCEL_TOOL = {
         "context). This NEVER overwrites the original file -- it always produces a new file, which the user "
         "will see as a downloadable attachment automatically. Include the operation's summary and the "
         "returned preview table in your reply ; never claim a modification succeeded if this tool returned "
-        "isError: true.\n\n"
+        "isError: true -- if it did, tell the user EXACTLY which step failed and why (quote the error), do not "
+        "silently continue as if it had worked, and do not describe a fabricated result for that step.\n\n"
+        "To chain several edits on the SAME file within one turn, you do not need to retype the previous call's "
+        "result file id from memory (a mistyped id is silently rejected as 'access denied' and breaks the "
+        "chain) -- pass the literal string \"LAST_RESULT\" as fileId instead, and it always resolves to the most "
+        "recent file this tool produced in this conversation turn.\n\n"
         "'operation.type' selects which of operation's other fields are required -- ALWAYS include every "
         "field listed as required for the chosen type, never only 'type' alone:\n"
         "  set_cell: requires cell, value\n"
@@ -201,7 +225,7 @@ _EDIT_EXCEL_TOOL = {
     "inputSchema": {
         "type": "object",
         "properties": {
-            "fileId": {"type": "string", "description": "The id of the attached Excel file, given in the '(id: ...)' marker of the DOCUMENT JOINT header."},
+            "fileId": {"type": "string", "description": "The id of the attached Excel file, given in the '(id: ...)' marker of the DOCUMENT JOINT header. To continue editing the result of a PREVIOUS edit_excel call in this SAME turn, pass the literal string \"LAST_RESULT\" instead of retyping that file's id."},
             "sheetName": {"type": "string", "description": "Target sheet name. Omit to use the active/first sheet."},
             "operation": {
                 "type": "object",
@@ -264,7 +288,33 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     # REEL du precedent avant de choisir son propre fichier de depart.
     lock_token = _acquire_run_lock(run_id)
     try:
-        file_id = _resolve_chained_file_id(run_id, requested_file_id)
+        is_sentinel = requested_file_id.strip().upper() == _LAST_RESULT_SENTINEL
+        if is_sentinel:
+            # Bug trouve en test E2E reel : meme avec le verrou + la
+            # redirection ci-dessus, le modele peut simplement MAL RETRANSCRIRE
+            # l'id du fichier precedent depuis son propre texte (un caractere
+            # ou un groupe de caracteres manquant) -- aucune correspondance
+            # exacte n'existe alors dans la table de chainage, donc aucune
+            # redirection n'est possible et l'appel echoue avec "acces refuse
+            # a ce fichier" (message trompeur : le vrai probleme est un id
+            # invalide, pas un probleme de permission). Le sentinel
+            # "LAST_RESULT" supprime le besoin de retranscrire quoi que ce
+            # soit : il se resout toujours vers le dernier fichier reellement
+            # produit par CE tour, quel que soit l'id que le modele a (ou
+            # n'a pas) memorise.
+            last_result = _get_last_result(run_id)
+            if not last_result:
+                return {
+                    "content": [{
+                        "type": "text",
+                        "text": "edit_excel error: fileId=\"LAST_RESULT\" was used but no edit_excel call has "
+                                "succeeded yet in this turn -- pass the real attached file's id for the first call.",
+                    }],
+                    "isError": True,
+                }
+            file_id = last_result
+        else:
+            file_id = _resolve_chained_file_id(run_id, requested_file_id)
         try:
             result = excel_tool.apply_edit(file_id, context["userId"], sheet_name, operation)
         except excel_tool.ExcelToolError as exc:
@@ -274,12 +324,13 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
 
         push_pending_file(run_id, result["newFileId"])
         _record_chained_file(run_id, requested_file_id, result["newFileId"])
+        _set_last_result(run_id, result["newFileId"])
     finally:
         _release_run_lock(run_id, lock_token)
     chain_note = (
         f" (poursuite automatique sur le dernier resultat de ce fichier dans cette conversation, "
         f"{file_id}, plutot que sur {requested_file_id})"
-        if file_id != requested_file_id else ""
+        if file_id != requested_file_id and not is_sentinel else ""
     )
     # Indice de chainage textuel : conserve en complement (jamais suffisant a
     # lui seul, cf. _resolve_chained_file_id -- verifie en test E2E reel que
