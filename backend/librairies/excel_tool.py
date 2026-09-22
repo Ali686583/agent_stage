@@ -325,8 +325,18 @@ def _apply_op_sort_range(sheet, op: dict) -> str:
     range_ref = str(op.get("range") or "")
     key_column = int(op.get("keyColumn") or 1)
     ascending = bool(op.get("ascending", True))
-    has_header = bool(op.get("hasHeader", True))
     start_col, start_row, end_col, end_row = _parse_range_ref(range_ref)
+    # Bug trouve en test E2E reel : quand hasHeader n'est pas fourni, le
+    # defaut etait toujours True, meme si 'range' commencait DEJA apres
+    # l'en-tete reel de la feuille (ex: "A2:D6", l'en-tete etant en ligne 1
+    # et hors de ce range) -- la premiere ligne de DONNEES se faisait alors
+    # silencieusement traiter comme un pseudo en-tete et exclue du tri
+    # (constate : une ligne sur 5 jamais triee, restee a sa place). Une
+    # ligne d'en-tete ne peut se trouver que sur la premiere ligne REELLE de
+    # la feuille (ligne 1) -- si 'range' commence plus bas, il n'y a par
+    # definition pas d'en-tete a l'interieur de ce range, donc le defaut
+    # devient False dans ce cas.
+    has_header = bool(op.get("hasHeader", start_row == 1))
     data_start = start_row + 1 if has_header else start_row
     key_col_index = start_col + key_column - 1
     # Cle de tri = valeur EFFECTIVE (formule evaluee si possible, cf.
@@ -364,8 +374,13 @@ def _apply_op_filter_rows(sheet, op: dict) -> str:
     column = int(op.get("columnIndex") or 1)
     operator = str(op.get("operator") or "eq")
     value = op.get("value")
-    has_header = bool(op.get("hasHeader", True))
     start_col, start_row, end_col, end_row = _parse_range_ref(range_ref)
+    # Meme correction que sort_range (bug trouve en test E2E reel) : une
+    # ligne d'en-tete ne peut se trouver que sur la premiere ligne REELLE de
+    # la feuille -- si 'range' commence plus bas (ex: "A2:D6"), le defaut de
+    # hasHeader devient False, sinon la premiere ligne de donnees du range
+    # etait silencieusement exclue du filtrage.
+    has_header = bool(op.get("hasHeader", start_row == 1))
 
     def matches(cell_value) -> bool:
         if operator == "eq":

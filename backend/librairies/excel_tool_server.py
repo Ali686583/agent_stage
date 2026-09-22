@@ -258,7 +258,7 @@ _EDIT_EXCEL_TOOL = {
                     "destCell": {"type": "string", "description": "Top-left destination cell to copy into. Required for copy_range."},
                     "keyColumn": {"type": "integer", "description": "1-based column number within 'range' to sort by. Required for sort_range."},
                     "ascending": {"type": "boolean", "description": "Sort direction for sort_range. Optional, defaults to true."},
-                    "hasHeader": {"type": "boolean", "description": "Whether the first row of 'range' is a header row to keep in place. Optional, defaults to true. Used by sort_range and filter_rows."},
+                    "hasHeader": {"type": "boolean", "description": "Whether the first row of 'range' is a header row to keep in place. Optional -- defaults to true only when 'range' starts at row 1 (the sheet's real header row); defaults to false for any range starting lower (e.g. 'A2:D6', which already excludes the header, so its own first row is real data, not a header). Used by sort_range and filter_rows."},
                     "operator": {"type": "string", "enum": ["eq", "contains", "gt", "lt"], "description": "Comparison used by filter_rows between each row's 'column' cell and 'value'."},
                 },
                 "required": ["type"],
