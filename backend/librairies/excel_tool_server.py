@@ -14,11 +14,14 @@ liste Redis a courte duree de vie, indexee par run_id (mission §5.3).
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 import redis
 
 from librairies import excel_tool
+
+_logger = logging.getLogger(__name__)
 
 REDIS_URL = os.environ.get("REDIS_URL", "")
 _PENDING_TTL_SECONDS = int(os.environ.get("FILE_LINK_TTL_SECONDS", "600"))
@@ -141,6 +144,11 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     file_id = str((arguments or {}).get("fileId") or "").strip()
     sheet_name = (arguments or {}).get("sheetName")
     operation = (arguments or {}).get("operation") or {}
+    # Diagnostic temporaire (bug en cours d'investigation, test E2E reel) :
+    # l'Agent semble envoyer 'header' mais le handler ne le voit pas --
+    # log la forme EXACTE recue pour trancher entre bug serveur et
+    # serialisation cote n8n. A retirer une fois le diagnostic termine.
+    _logger.warning("edit_excel DEBUG arguments=%r operation=%r type(operation)=%s", arguments, operation, type(operation))
     if not file_id:
         return {"content": [{"type": "text", "text": "edit_excel error: fileId is required."}], "isError": True}
     try:
