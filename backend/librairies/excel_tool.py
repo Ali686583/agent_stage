@@ -83,6 +83,19 @@ def _resolve_sheet(workbook, sheet_name: str | None):
     return workbook.active
 
 
+def _set_cell(sheet, row: int, column: int, value) -> None:
+    """Ecrit une valeur de cellule, y compris None (bug trouve en test E2E
+    reel, reproduit localement) : `Worksheet.cell(row=r, column=c,
+    value=v)` est un NO-OP quand v est None -- la signature d'openpyxl fait
+    `if value is not None: cell.value = value`, donc `value=None` ne touche
+    jamais la cellule. A utiliser PARTOUT dans ce module a la place de
+    `sheet.cell(..., value=...)` des qu'une valeur COPIEE/CALCULEE (jamais
+    garantie non-None : cellule source vide lors d'un copy_range/sort_range/
+    filter_rows, ou None explicite pour vider une cellule via set_cell/
+    set_range) est ecrite."""
+    sheet.cell(row=row, column=column).value = value
+
+
 def _parse_cell_ref(ref: str) -> tuple[int, int]:
     match = re.match(r"^([A-Za-z]+)(\d+)$", (ref or "").strip())
     if not match:
@@ -136,7 +149,7 @@ def _apply_op_add_row(sheet, op: dict) -> str:
     else:
         target_row = sheet.max_row + 1
     for i, value in enumerate(values, start=1):
-        sheet.cell(row=target_row, column=i, value=value)
+        _set_cell(sheet, target_row, i, value)
     return f"ligne ajoutee en {target_row} ({len(values)} valeurs)"
 
 
@@ -151,7 +164,7 @@ def _apply_op_delete_row(sheet, op: dict) -> str:
 def _apply_op_set_cell(sheet, op: dict) -> str:
     cell = str(op.get("cell") or "")
     col, row = _parse_cell_ref(cell)
-    sheet.cell(row=row, column=col, value=op.get("value"))
+    _set_cell(sheet, row, col, op.get("value"))
     return f"cellule {cell} mise a jour"
 
 
@@ -162,7 +175,7 @@ def _apply_op_set_range(sheet, op: dict) -> str:
     changed = 0
     for r, row_values in enumerate(values):
         for c, value in enumerate(row_values):
-            sheet.cell(row=start_row + r, column=start_col + c, value=value)
+            _set_cell(sheet, start_row + r, start_col + c, value)
             changed += 1
     return f"plage {range_ref} mise a jour ({changed} cellules)"
 
@@ -197,7 +210,7 @@ def _apply_op_copy_range(sheet, op: dict) -> str:
     for r in range(end_row - start_row + 1):
         for c in range(end_col - start_col + 1):
             value = sheet.cell(row=start_row + r, column=start_col + c).value
-            sheet.cell(row=dest_row + r, column=dest_col + c, value=value)
+            _set_cell(sheet, dest_row + r, dest_col + c, value)
             copied += 1
     return f"plage {source_range} copiee vers {dest_cell} ({copied} cellules)"
 
@@ -208,7 +221,14 @@ def _apply_op_clear_range(sheet, op: dict) -> str:
     cleared = 0
     for row in range(start_row, end_row + 1):
         for col in range(start_col, end_col + 1):
-            sheet.cell(row=row, column=col, value=None)
+            # Bug trouve en test E2E reel (reproduit localement) :
+            # Worksheet.cell(row=r, column=c, value=None) est un NO-OP dans
+            # openpyxl -- sa signature fait `if value is not None: cell.value
+            # = value`, donc passer explicitement None ne modifie jamais la
+            # cellule (elle garde son ancienne valeur). L'outil rapportait
+            # "4 cellules effacees" sans avoir rien efface. Assignation
+            # directe de l'attribut .value, qui contourne ce garde-fou.
+            sheet.cell(row=row, column=col).value = None
             cleared += 1
     return f"plage {range_ref} effacee ({cleared} cellules)"
 
@@ -227,7 +247,7 @@ def _apply_op_sort_range(sheet, op: dict) -> str:
     rows.sort(key=lambda r: (r[key_column - 1] is None, r[key_column - 1]), reverse=not ascending)
     for i, row_values in enumerate(rows):
         for c, value in enumerate(row_values):
-            sheet.cell(row=data_start + i, column=start_col + c, value=value)
+            _set_cell(sheet, data_start + i, start_col + c, value)
     return f"plage {range_ref} triee sur la colonne {key_column} ({'croissant' if ascending else 'decroissant'})"
 
 
@@ -261,7 +281,7 @@ def _apply_op_filter_rows(sheet, op: dict) -> str:
     out_row = 1
     if has_header:
         for c in range(start_col, end_col + 1):
-            result_sheet.cell(row=1, column=c - start_col + 1, value=sheet.cell(row=start_row, column=c).value)
+            _set_cell(result_sheet, 1, c - start_col + 1, sheet.cell(row=start_row, column=c).value)
         out_row = 2
     data_start = start_row + 1 if has_header else start_row
     matched = 0
@@ -269,7 +289,7 @@ def _apply_op_filter_rows(sheet, op: dict) -> str:
         cell_value = sheet.cell(row=r, column=column).value
         if matches(cell_value):
             for c in range(start_col, end_col + 1):
-                result_sheet.cell(row=out_row, column=c - start_col + 1, value=sheet.cell(row=r, column=c).value)
+                _set_cell(result_sheet, out_row, c - start_col + 1, sheet.cell(row=r, column=c).value)
             out_row += 1
             matched += 1
     return f"{matched} ligne(s) filtree(s) vers la nouvelle feuille '{result_sheet.title}'"
