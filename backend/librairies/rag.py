@@ -89,6 +89,20 @@ def _ensure_vector_adapter(conn) -> None:
 
     register_vector(conn)
 
+
+def _as_vector_param(embedding):
+    """Bug trouve en test E2E reel : register_vector() n'enregistre un
+    dumper QUE pour pgvector.utils.Vector (ou numpy.ndarray), jamais pour un
+    simple list[float] Python -- une liste brute passee comme parametre est
+    donc serialisee par l'adaptateur ARRAY par defaut de psycopg
+    ("double precision[]"), jamais reconnue comme un `vector`, d'ou l'erreur
+    Postgres "operator does not exist: vector <=> double precision[]".
+    Emballage explicite obligatoire avant toute utilisation comme parametre
+    d'une colonne/operateur vector."""
+    from pgvector.utils import Vector
+
+    return Vector(embedding)
+
 _logger = logging.getLogger(__name__)
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "").rstrip("/")
@@ -403,7 +417,7 @@ def ingest_document(document_id: str) -> None:
         # dans la MEME transaction que le passage a READY plus bas.
         conn.execute("DELETE FROM document_chunks WHERE document_id = %s", (document_id,))
         for index, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            embedding_value = list(embedding) if use_pgvector else embedding
+            embedding_value = _as_vector_param(embedding) if use_pgvector else list(embedding)
             conn.execute(
                 "INSERT INTO document_chunks (id, document_id, chunk_index, content, embedding) VALUES (%s,%s,%s,%s,%s)",
                 (new_id("chunk"), document_id, index, chunk, embedding_value),
@@ -472,7 +486,7 @@ def search_documents(query: str, user_id: str, top_k: int = 6) -> list[dict]:
                     WHERE {_VISIBILITY_SQL}
                     ORDER BY distance ASC
                     LIMIT %(top_k)s""",
-                {"user_id": user_id, "query_embedding": query_embedding, "top_k": top_k},
+                {"user_id": user_id, "query_embedding": _as_vector_param(query_embedding), "top_k": top_k},
             ).fetchall()
             return [{"content": r["content"], "documentName": r["document_name"], "documentId": r["document_id"]} for r in rows]
 
