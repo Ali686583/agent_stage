@@ -27,7 +27,7 @@ import redis
 import requests
 from rq import Queue
 
-from librairies import chart_render, connections_bank, google_drive, oauth_connector, platform_client, web_search, web_search_tool_server, workflow_bank, workspace
+from librairies import chart_render, connections_bank, excel_tool_server, google_drive, oauth_connector, platform_client, rag_tool_server, text_extraction, web_search, web_search_tool_server, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.security import sign_file_token, sign_tool_token
 from librairies.web_search import WebSearchError
@@ -268,17 +268,6 @@ def _build_drive_summary_prompt(user_instruction: str, document_text: str) -> st
     )
 
 
-# Extensions/types traites comme du texte brut (decodage direct, aucune
-# dependance necessaire) -- volontairement une liste ouverte de formats
-# lisibles tels quels, jamais une simulation d'extraction pour un format non
-# reconnu (voir _extract_attachment_text ci-dessous, qui retourne alors une
-# erreur explicite plutot que d'inventer un contenu).
-_PLAIN_TEXT_EXTENSIONS = {
-    "txt", "md", "markdown", "csv", "tsv", "json", "log", "py", "js", "ts",
-    "html", "htm", "css", "yaml", "yml", "xml", "ini", "cfg",
-}
-
-
 def _extract_attachment_text(file_id: str, download_url: str) -> tuple[str | None, str | None]:
     """Contenu REEL d'une piece jointe (mission "correction architecture
     MCP" §2 : "le contenu pertinent du document doit etre fourni a l'IA...
@@ -288,7 +277,12 @@ def _extract_attachment_text(file_id: str, download_url: str) -> tuple[str | Non
     n'a pas acces au volume de stockage (service Railway separe du service
     web, voir railway volume list) : le fichier est donc recupere via son
     URL signee, exactement comme n8n le fait deja pour les boutons de la
-    banque (voir file_links plus bas)."""
+    banque (voir file_links plus bas).
+
+    Mince enveloppe autour de librairies/text_extraction.py (mission RAG
+    §3/§4b) : le telechargement reste ici (specifique a ce worker), mais la
+    logique "octets -> texte" est partagee telle quelle avec l'ingestion RAG,
+    jamais dupliquee."""
     try:
         file_record = workspace.get_file(file_id)
     except Exception:
@@ -296,8 +290,7 @@ def _extract_attachment_text(file_id: str, download_url: str) -> tuple[str | Non
     if not file_record:
         return None, "fichier introuvable"
     name = file_record.get("name") or file_id
-    mime_type = (file_record.get("mimeType") or "").lower()
-    extension = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    mime_type = file_record.get("mimeType") or ""
 
     try:
         response = requests.get(download_url, timeout=20)
@@ -306,24 +299,7 @@ def _extract_attachment_text(file_id: str, download_url: str) -> tuple[str | Non
     except requests.exceptions.RequestException as exc:
         return None, f"telechargement impossible ({str(exc)[:150]})"
 
-    if mime_type.startswith("text/") or extension in _PLAIN_TEXT_EXTENSIONS:
-        return raw.decode("utf-8", errors="replace"), None
-
-    if mime_type == "application/pdf" or extension == "pdf":
-        try:
-            import io
-
-            from pypdf import PdfReader
-
-            reader = PdfReader(io.BytesIO(raw))
-            text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
-        except Exception as exc:
-            return None, f"extraction PDF impossible ({str(exc)[:150]})"
-        if not text:
-            return None, "PDF sans texte extractible (probablement une image scannee)"
-        return text, None
-
-    return None, f"type de fichier non pris en charge pour l'aperçu automatique ({extension or mime_type or 'inconnu'})"
+    return text_extraction.extract_text(raw, name, mime_type)
 
 
 def _build_attached_documents_context(file_ids: list[str], file_links: list[dict]) -> str:
@@ -344,9 +320,9 @@ def _build_attached_documents_context(file_ids: list[str], file_links: list[dict
             file_record = None
         display_name = (file_record or {}).get("name") or file_id
         if error:
-            parts.append(f"--- DOCUMENT JOINT : {display_name} (INDISPONIBLE : {error}) ---")
+            parts.append(f"--- DOCUMENT JOINT : {display_name} (id: {file_id}) (INDISPONIBLE : {error}) ---")
         else:
-            parts.append(f"--- DOCUMENT JOINT : {display_name} ---\n{text}\n--- FIN DU DOCUMENT ---")
+            parts.append(f"--- DOCUMENT JOINT : {display_name} (id: {file_id}) ---\n{text}\n--- FIN DU DOCUMENT ---")
     if not parts:
         return ""
     return (
@@ -458,6 +434,37 @@ def execute_workflow_run(
             tool_token = None
         if tool_token:
             web_search_tool_url = f"{FRONTEND_URL}/api/workspace/mcp/web-search?exp={expires_at}&token={tool_token}"
+
+    # Outils agentiques RAG et Excel (mission RAG §4d/§4h, mission Excel §5.4) :
+    # MEME principe et MEME restriction que l'outil de recherche web
+    # ci-dessus (champ dedie toujours attache aux webhooks PRINCIPAUX
+    # uniquement, jamais insere dans mcpServers -- gate different, reserve
+    # aux connexions de la banque). Le token encode en plus user_id (RAG,
+    # pour l'autorisation) et user_id+run_id (Excel, pour retrouver le
+    # fichier genere une fois l'execution n8n terminee, voir plus bas).
+    rag_search_tool_url = f"{FRONTEND_URL}/api/workspace/mcp/stub"
+    if is_main_provider_webhook and rag_tool_server.is_configured():
+        expires_at = int(time.time()) + FILE_LINK_TTL_SECONDS
+        try:
+            tool_token = sign_tool_token(f"rag-search:{user_id}", expires_at)
+        except RuntimeError:
+            tool_token = None
+        if tool_token:
+            rag_search_tool_url = (
+                f"{FRONTEND_URL}/api/workspace/mcp/rag?exp={expires_at}&token={tool_token}&uid={user_id}"
+            )
+
+    excel_edit_tool_url = f"{FRONTEND_URL}/api/workspace/mcp/stub"
+    if is_main_provider_webhook and excel_tool_server.is_configured():
+        expires_at = int(time.time()) + FILE_LINK_TTL_SECONDS
+        try:
+            tool_token = sign_tool_token(f"excel-edit:{user_id}:{run_id}", expires_at)
+        except RuntimeError:
+            tool_token = None
+        if tool_token:
+            excel_edit_tool_url = (
+                f"{FRONTEND_URL}/api/workspace/mcp/excel-edit?exp={expires_at}&token={tool_token}&uid={user_id}&run={run_id}"
+            )
 
     file_links = []
     for file_id in file_ids:
@@ -665,6 +672,13 @@ def execute_workflow_run(
         # c'est le workflow n8n qui decide de l'attacher ou non a l'Agent,
         # jamais ce backend qui force une recherche.
         "webSearchToolUrl": web_search_tool_url,
+        # Outil "recherche documentaire interne" agentique (mission RAG §4i) :
+        # meme principe que webSearchToolUrl -- c'est le workflow n8n qui
+        # decide de l'attacher a l'Agent, jamais ce backend qui force une
+        # recherche RAG.
+        "ragSearchToolUrl": rag_search_tool_url,
+        # Outil "modification Excel" agentique (mission Excel §5.6).
+        "excelEditToolUrl": excel_edit_tool_url,
     }
 
     try:
@@ -720,6 +734,14 @@ def execute_workflow_run(
     stored_payload["webSearchToolUrl"] = (
         web_search_tool_url if web_search_tool_url.endswith("/mcp/stub") else True
     )
+    # Meme redaction pour les liens signes RAG/Excel (mission §9, secret
+    # audit) : jamais persistes tels quels, meme de courte duree de vie.
+    stored_payload["ragSearchToolUrl"] = (
+        rag_search_tool_url if rag_search_tool_url.endswith("/mcp/stub") else True
+    )
+    stored_payload["excelEditToolUrl"] = (
+        excel_edit_tool_url if excel_edit_tool_url.endswith("/mcp/stub") else True
+    )
 
     result = workspace.create_result(
         conversation_id=conversation_id,
@@ -738,7 +760,7 @@ def execute_workflow_run(
     # marqueur lisible, le rendu reel restant dans "blocks" ci-dessus.
     plain_summary = chart_render.CHART_SPEC_FENCE_RE.sub("[Graphique]", str(n8n_data.get("summary", "")))
 
-    workspace.add_message(
+    assistant_message = workspace.add_message(
         conversation_id=conversation_id,
         user_id=None,
         author_name="ChatGPT" if model == "chatgpt" else "Claude",
@@ -751,6 +773,18 @@ def execute_workflow_run(
         publish_extra={"requestId": request_id},
     )
     workspace.touch_conversation(conversation_id)
+    # Fichier(s) genere(s) par l'outil Excel pendant cette execution (mission
+    # Excel §5.5) : la piece jointe assistant n'existe que si l'Agent a
+    # REELLEMENT appele edit_excel (liste vide sinon -- aucun changement de
+    # comportement pour une reponse normale). renderMessage() cote frontend
+    # affiche deja les pieces jointes de n'importe quel role, donc rien
+    # d'autre a faire pour que le bouton de telechargement apparaisse.
+    try:
+        pending_file_ids = excel_tool_server.pop_pending_files(run_id)
+    except Exception:
+        pending_file_ids = []
+    if pending_file_ids:
+        workspace.link_files_to_message(assistant_message["id"], pending_file_ids)
     workspace.complete_workflow_run(
         run_id, status="completed", result_id=result["id"], n8n_execution_id=n8n_data.get("executionId")
     )

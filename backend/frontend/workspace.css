@@ -55,10 +55,36 @@ html, body {
   width: 280px;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* flex:1 (pas height:100%) : laisse la place, sous le flex-direction:column
+     de .workspace-sidebar, a un sibling comme .sidebar-documentation-entry
+     de rester visible EN DEHORS de cette zone scrollable (mission RAG §17).
+     min-height:0 est necessaire pour qu'un flex-item accepte de retrecir
+     sous sa hauteur de contenu et laisse vraiment le scroll interne agir. */
+  flex: 1;
+  min-height: 0;
   padding: 14px 10px;
   overflow-y: auto;
 }
+
+.sidebar-documentation-separator { flex-shrink: 0; }
+.sidebar-documentation-entry {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: calc(100% - 20px);
+  margin: 8px 10px 10px;
+  padding: 9px 12px;
+  border: 0;
+  border-radius: var(--radius-medium);
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.9rem;
+  cursor: pointer;
+  text-align: start;
+}
+.sidebar-documentation-entry:hover { background: var(--color-border-light); }
+.sidebar-documentation-entry svg { flex-shrink: 0; color: var(--color-icon); }
 
 /* Encoche en forme de trapeze aux angles arrondis (dessinee en SVG : un
    clip-path/border-radius CSS ne peut pas arrondir les coins d'un trapeze).
@@ -899,7 +925,11 @@ html, body {
   max-width: 220px;
 }
 .file-chip.failed { border-color: var(--color-error); color: var(--color-error); background: transparent; }
-.file-chip-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Correctif overflow (mission §5) : flex:1 + min-width:0 sont necessaires
+   en plus de l'ellipsis pour qu'un item flex accepte de retrecir sous sa
+   largeur intrinseque (sinon overflow/text-overflow restent des no-op) --
+   meme principe que .reply-preview-text, qui tronque deja correctement. */
+.file-chip-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .file-chip button {
   border: 0;
   background: none;
@@ -1514,3 +1544,98 @@ html, body {
   color: var(--color-text);
   cursor: pointer;
 }
+
+/* =========================================================================
+   Notifications (mission notifications, Phase 6)
+========================================================================= */
+
+.notifications-menu { width: 320px; max-width: 90vw; padding: 0; }
+.notifications-menu-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 14px; border-bottom: 1px solid var(--color-border-light);
+}
+.notifications-menu-header h3 { margin: 0; font-size: 0.9rem; }
+.notifications-list { max-height: 360px; overflow-y: auto; }
+.notification-row {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 14px; border-bottom: 1px solid var(--color-border-light);
+  cursor: pointer; text-align: start; width: 100%; background: none; border-inline: 0; border-top: 0;
+}
+.notification-row:hover { background: var(--color-border-light); }
+.notification-row.unread { background: var(--color-accent-soft-bg); }
+.notification-row-title { font-size: 0.85rem; font-weight: 600; color: var(--color-text); }
+.notification-row-preview {
+  font-size: 0.8rem; color: var(--color-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notification-row-time { font-size: 0.72rem; color: var(--color-muted-strong); }
+.notifications-empty { padding: 24px 14px; text-align: center; color: var(--color-muted); font-size: 0.85rem; }
+
+/* Toasts : empilement fixe, ancre juste au-dessus de la rangee de boutons
+   d'action (mission §6g/§9 : "sort de derriere/au-dessus de l'entry, puis
+   apparait au-dessus de la rangee de boutons", jamais un overlay plein
+   ecran, jamais durablement au-dessus du composer). */
+.notification-toast-stack {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 40;
+  pointer-events: none;
+}
+.notification-toast {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-width: 360px;
+  margin-inline: auto;
+  padding: 10px 14px;
+  border-radius: var(--radius-medium);
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(12px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.notification-toast.visible { opacity: 1; transform: translateY(0); }
+.notification-toast-title { font-size: 0.85rem; font-weight: 600; }
+.notification-toast-preview {
+  font-size: 0.8rem; color: var(--color-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* =========================================================================
+   Documentation / RAG (mission RAG, Phase 4/7)
+========================================================================= */
+
+.docs-modal-box { max-width: 640px; display: flex; flex-direction: column; max-height: 80vh; }
+.docs-modal-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;
+}
+.docs-modal-header h2 { margin: 0; font-size: 1.05rem; }
+.docs-modal-toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.docs-modal-toolbar input[type="text"] {
+  flex: 1; min-width: 0; padding: 8px 10px; border-radius: var(--radius-medium);
+  border: 1px solid var(--color-border); background: var(--color-input-bg); color: var(--color-text);
+}
+.docs-modal-list { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.doc-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px; border-radius: var(--radius-medium); border: 1px solid var(--color-border-light);
+}
+.doc-row-icon { flex-shrink: 0; color: var(--color-icon); }
+.doc-row-main { flex: 1; min-width: 0; }
+.doc-row-name {
+  font-size: 0.88rem; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.doc-row-meta { font-size: 0.75rem; color: var(--color-muted); }
+.doc-row-status { font-size: 0.72rem; padding: 2px 8px; border-radius: 999px; flex-shrink: 0; }
+.doc-row-status.status-READY { background: var(--color-accent-soft-bg); color: var(--color-accent-text); }
+.doc-row-status.status-PROCESSING,
+.doc-row-status.status-UPLOADED { background: var(--color-border-light); color: var(--color-muted-strong); }
+.doc-row-status.status-FAILED { background: transparent; color: var(--color-error); border: 1px solid var(--color-error); }
+.doc-row-actions { display: flex; gap: 4px; flex-shrink: 0; }

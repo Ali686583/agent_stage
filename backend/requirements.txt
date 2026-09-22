@@ -10,3 +10,9 @@ rq==1.16.2
 cryptography==43.0.1
 matplotlib==3.9.2
 pypdf==5.0.1
+python-docx==1.1.2
+openpyxl==3.1.5
+python-pptx==1.0.2
+xlrd==2.0.1
+openai==1.51.0
+pgvector==0.3.6

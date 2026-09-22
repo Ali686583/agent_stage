@@ -22,7 +22,7 @@ import uuid
 
 from psycopg.types.json import Jsonb
 
-from librairies import realtime
+from librairies import notifications, realtime
 from librairies.database import _db
 
 _logger = logging.getLogger(__name__)
@@ -749,6 +749,24 @@ def add_message(
                 "INSERT INTO message_mentions (message_id, user_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
                 (message_id, mentioned_user_id),
             )
+        # Notifications mention/reponse (mission notifications §6b) : MEME
+        # transaction que le message et ses mentions -- soit tout est
+        # persiste ensemble, soit rien (jamais un message envoye sans ses
+        # notifications, ni l'inverse). Uniquement pour un message utilisateur
+        # REEL (user_id non nul) : un message assistant (role="assistant",
+        # user_id=None) ne genere jamais de notification.
+        notified_user_ids: set[str] = set()
+        if user_id:
+            notified_user_ids = notifications.create_notifications_for_message(
+                conn,
+                actor_user_id=user_id,
+                author_name=author_name,
+                conversation_id=conversation_id,
+                message_id=message_id,
+                content=content,
+                mentioned_user_ids=mentioned_user_ids,
+                reply_to_message_id=reply_to_message_id,
+            )
     created = get_message(message_id)
     try:
         # publish_extra (ex. requestId) n'est ajoute qu'a l'evenement temps
@@ -761,6 +779,21 @@ def add_message(
         # verite) ; un Redis indisponible ne doit jamais faire echouer
         # l'envoi, seul le push temps reel est perdu (rattrapable via seq).
         _logger.warning("publish_event a echoue pour la conversation %s", conversation_id, exc_info=True)
+    # Toast temps reel (mission notifications §6c) : best-effort, HORS
+    # transaction (les notifications sont deja persistees ci-dessus, donc
+    # deja recuperables au prochain GET /notifications meme si Redis est
+    # indisponible ici).
+    for recipient_id in notified_user_ids:
+        try:
+            realtime.publish_user_event(
+                recipient_id,
+                "notification.created",
+                {"type": "mention" if recipient_id in (mentioned_user_ids or []) else "reply",
+                 "actorName": author_name, "conversationId": conversation_id,
+                 "messageId": message_id, "previewText": (content or "")[:200]},
+            )
+        except Exception:
+            _logger.warning("publish_user_event a echoue pour %s", recipient_id, exc_info=True)
     return created
 
 

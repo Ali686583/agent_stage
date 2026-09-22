@@ -43,3 +43,29 @@ def subscribe(conversation_id: str):
     pubsub = _client.pubsub()
     pubsub.subscribe(_channel(conversation_id))
     return pubsub
+
+
+# ---------------------------------------------------------------------------
+# Canal PAR UTILISATEUR (mission notifications, Phase 6) : distinct du canal
+# par conversation ci-dessus -- une notification doit atteindre son
+# destinataire quelle que soit la conversation actuellement ouverte dans son
+# navigateur (y compris aucune). Meme mecanisme, meme tolerance aux pannes
+# (best-effort, jamais une notification perdue cote Postgres si Redis est
+# indisponible -- voir workspace.add_message, qui persiste TOUJOURS la
+# notification avant de tenter cette publication).
+# ---------------------------------------------------------------------------
+
+def _user_channel(user_id: str) -> str:
+    return f"user:{user_id}:notifications"
+
+
+def publish_user_event(user_id: str, event_type: str, data: dict) -> None:
+    _client.publish(_user_channel(user_id), json.dumps({"type": event_type, "data": data}))
+
+
+def subscribe_user(user_id: str):
+    """Meme contrat que subscribe() ci-dessus : l'appelant doit toujours
+    fermer le pubsub a la deconnexion du flux SSE."""
+    pubsub = _client.pubsub()
+    pubsub.subscribe(_user_channel(user_id))
+    return pubsub

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import mimetypes
 import os
 import time
@@ -29,13 +30,15 @@ import uuid
 import requests
 from flask import Blueprint, Response, jsonify, redirect, request, send_file, stream_with_context
 
-from librairies import connections_bank, database, google_drive, mcp_stub_server, n8n_client, oauth_connector, realtime, web_search_tool_server, workflow_bank, workspace
+from librairies import connections_bank, database, excel_tool_server, google_drive, mcp_stub_server, n8n_client, notifications, oauth_connector, rag, rag_jobs, rag_tool_server, realtime, text_extraction, web_search_tool_server, workflow_bank, workspace
 from librairies.google_drive import GoogleDriveConfigError, GoogleDriveError
 from librairies.oauth_connector import OAuthConnectorConfigError, OAuthConnectorError
 from librairies.jobs import execute_workflow_run, queue
 from librairies.n8n_client import N8nConfigError
 from librairies.rate_limit import limiter
 from librairies.security import generate_token, hash_token, sign_file_token, sign_tool_token
+
+_logger = logging.getLogger(__name__)
 
 SESSION_COOKIE_NAME = "agent_stage_session"
 
@@ -49,8 +52,13 @@ ALLOWED_MIME_TYPES = {
     "application/pdf",
     "text/plain",
     "text/csv",
+    "text/markdown",
+    "application/json",
+    "application/xml",
+    "text/xml",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/vnd.ms-excel",
     "application/msword",
     "image/png",
@@ -572,6 +580,71 @@ def events_route():
 
 
 # ---------------------------------------------------------------------------
+# Notifications (mission notifications, Phase 6) : canal PAR UTILISATEUR
+# (librairies/realtime.py::subscribe_user), independant de toute conversation
+# ouverte -- une notification doit arriver quel que soit l'ecran affiche.
+# Authentification par session uniquement, aucune verification de
+# participation necessaire (le canal est deja intrinsequement personnel).
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/notifications/events", methods=["GET"])
+def notifications_events_route():
+    user, err = _require_user()
+    if err:
+        return err
+
+    def generate():
+        pubsub = realtime.subscribe_user(user["id"])
+        try:
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                try:
+                    payload = json.loads(raw["data"])
+                except (TypeError, ValueError, KeyError):
+                    continue
+                yield _sse_frame(None, payload.get("type", "notification.created"), payload.get("data", {}))
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/notifications", methods=["GET"])
+def list_notifications_route():
+    user, err = _require_user()
+    if err:
+        return err
+    before = request.args.get("before") or None
+    limit = request.args.get("limit", default=30, type=int) or 30
+    items = notifications.list_notifications(user["id"], before=before, limit=limit)
+    return jsonify(ok=True, notifications=items, unreadCount=notifications.count_unread(user["id"]))
+
+
+@workspace_bp.route("/notifications/<notification_id>/read", methods=["POST"])
+def mark_notification_read_route(notification_id):
+    user, err = _require_user()
+    if err:
+        return err
+    notifications.mark_read(notification_id, user["id"])
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/notifications/read-all", methods=["POST"])
+def mark_all_notifications_read_route():
+    user, err = _require_user()
+    if err:
+        return err
+    notifications.mark_all_read(user["id"])
+    return jsonify(ok=True)
+
+
+# ---------------------------------------------------------------------------
 # Serveur MCP "vide" (voir librairies/mcp_stub_server.py) : appele
 # DIRECTEMENT par n8n (jamais par le navigateur), jamais authentifie par
 # session -- meme principe que /files/<id>/signed ci-dessus, un appelant
@@ -677,6 +750,130 @@ def web_search_tool_messages_route():
     body = request.get_json(silent=True) or {}
     response_payload = web_search_tool_server.handle_jsonrpc(body)
     web_search_tool_server.publish_response(session_id, response_payload)
+    return "", 202
+
+
+# ---------------------------------------------------------------------------
+# Outil "recherche documentaire" agentique (mission RAG §4g/§4h) : meme
+# principe de lien signe que /mcp/web-search ci-dessus, mais le token encode
+# EN PLUS l'utilisateur pour le compte de qui l'Agent execute (necessaire
+# pour appliquer l'autorisation RAG avant tout retour de passage -- voir
+# librairies/rag.py). Jamais authentifie par cookie de session (appelant
+# serveur-a-serveur, n8n), jamais insere dans le mecanisme mcpServers de la
+# banque de connexions.
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/mcp/rag", methods=["GET"])
+def rag_tool_sse_route():
+    if not rag_tool_server.is_configured():
+        return _error(503, "Outil de recherche documentaire non configure (Redis manquant).")
+    expires_at = request.args.get("exp", type=int)
+    token = request.args.get("token", "")
+    user_id = str(request.args.get("uid", ""))[:100]
+    if not expires_at or not token or not user_id:
+        return _error(400, "Lien invalide.")
+    if int(time.time()) > expires_at:
+        return _error(410, "Lien expire.")
+    try:
+        expected = sign_tool_token(f"rag-search:{user_id}", expires_at)
+    except RuntimeError:
+        return _error(503, "Signature d'outils non configuree.")
+    if not hmac.compare_digest(expected, token):
+        return _error(403, "Lien invalide.")
+
+    session_id = generate_token(16)
+    rag_tool_server.register_session(session_id, user_id)
+
+    def generate():
+        pubsub = rag_tool_server.subscribe(session_id)
+        try:
+            yield f"event: endpoint\ndata: /api/workspace/mcp/rag/messages?sessionId={session_id}\n\n"
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"event: message\ndata: {raw['data']}\n\n"
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/mcp/rag/messages", methods=["POST"])
+def rag_tool_messages_route():
+    if not rag_tool_server.is_configured():
+        return _error(503, "Outil de recherche documentaire non configure (Redis manquant).")
+    session_id = str(request.args.get("sessionId", ""))[:64]
+    if not session_id:
+        return _error(400, "sessionId manquant.")
+    body = request.get_json(silent=True) or {}
+    response_payload = rag_tool_server.handle_jsonrpc(body, session_id)
+    rag_tool_server.publish_response(session_id, response_payload)
+    return "", 202
+
+
+# ---------------------------------------------------------------------------
+# Outil "modification Excel" agentique (mission Excel §5.4) : meme principe
+# que /mcp/rag ci-dessus, token encodant en plus le run_id (pour retrouver
+# le fichier genere une fois l'execution terminee, voir
+# librairies/excel_tool_server.py et jobs.py).
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/mcp/excel-edit", methods=["GET"])
+def excel_edit_tool_sse_route():
+    if not excel_tool_server.is_configured():
+        return _error(503, "Outil de modification Excel non configure (Redis manquant).")
+    expires_at = request.args.get("exp", type=int)
+    token = request.args.get("token", "")
+    user_id = str(request.args.get("uid", ""))[:100]
+    run_id = str(request.args.get("run", ""))[:100]
+    if not expires_at or not token or not user_id or not run_id:
+        return _error(400, "Lien invalide.")
+    if int(time.time()) > expires_at:
+        return _error(410, "Lien expire.")
+    try:
+        expected = sign_tool_token(f"excel-edit:{user_id}:{run_id}", expires_at)
+    except RuntimeError:
+        return _error(503, "Signature d'outils non configuree.")
+    if not hmac.compare_digest(expected, token):
+        return _error(403, "Lien invalide.")
+
+    session_id = generate_token(16)
+    excel_tool_server.register_session(session_id, user_id, run_id)
+
+    def generate():
+        pubsub = excel_tool_server.subscribe(session_id)
+        try:
+            yield f"event: endpoint\ndata: /api/workspace/mcp/excel-edit/messages?sessionId={session_id}\n\n"
+            while True:
+                raw = pubsub.get_message(timeout=20, ignore_subscribe_messages=True)
+                if raw is None:
+                    yield ": heartbeat\n\n"
+                    continue
+                yield f"event: message\ndata: {raw['data']}\n\n"
+        finally:
+            pubsub.close()
+
+    response = Response(stream_with_context(generate()), mimetype="text/event-stream")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
+
+
+@workspace_bp.route("/mcp/excel-edit/messages", methods=["POST"])
+def excel_edit_tool_messages_route():
+    if not excel_tool_server.is_configured():
+        return _error(503, "Outil de modification Excel non configure (Redis manquant).")
+    session_id = str(request.args.get("sessionId", ""))[:64]
+    if not session_id:
+        return _error(400, "sessionId manquant.")
+    body = request.get_json(silent=True) or {}
+    response_payload = excel_tool_server.handle_jsonrpc(body, session_id)
+    excel_tool_server.publish_response(session_id, response_payload)
     return "", 202
 
 
@@ -862,9 +1059,13 @@ def delete_action_bank_route(action_id):
         return _error(404, "Action introuvable.")
     if action["createdBy"] != user["id"] and user.get("role") != "admin":
         return _error(403, "Seul le createur ou un administrateur peut supprimer definitivement cette action.")
-    deleted = workflow_bank.delete_action(action_id)
+    # force_delete_action (mission "Supprimer definitivement" §3) : detache
+    # d'abord l'action de la banque partagee (entry_actions) puis la
+    # supprime, en un seul clic -- decision produit assumee, ne refuse plus
+    # jamais avec un 409 comme l'ancien delete_action().
+    deleted = workflow_bank.force_delete_action(action_id)
     if not deleted:
-        return _error(409, "Cette action est encore utilisee ailleurs : impossible de la supprimer definitivement.")
+        return _error(404, "Action introuvable ou deja supprimee.")
 
     # Nettoyage best-effort du workflow n8n associe : sans ca, l'action
     # disparaissait de la banque mais son workflow n8n restait actif et
@@ -1305,7 +1506,15 @@ def upload_file_route():
         return _error(400, "Nom de fichier manquant.")
 
     mime_type = uploaded.mimetype or mimetypes.guess_type(uploaded.filename)[0] or "application/octet-stream"
-    if mime_type not in ALLOWED_MIME_TYPES:
+    upload_extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
+    # Repli par extension (mission RAG §3, "MIME/extension-driven, pas
+    # special-case PDF") : beaucoup de navigateurs envoient
+    # application/octet-stream pour des fichiers de code/texte connus.
+    # KNOWN_TEXT_EXTENSIONS est la MEME liste que celle utilisee pour savoir
+    # si on sait effectivement en extraire du texte (text_extraction.py) --
+    # jamais deux listes qui divergent.
+    is_known_text_extension = mime_type == "application/octet-stream" and upload_extension in text_extraction.KNOWN_TEXT_EXTENSIONS
+    if mime_type not in ALLOWED_MIME_TYPES and not is_known_text_extension:
         return _error(415, "Type de fichier non autorise.")
 
     content = uploaded.read()
@@ -1328,6 +1537,26 @@ def upload_file_route():
         size_bytes=len(content),
         storage_reference=storage_name,
     )
+    # Auto-ingestion RAG (mission RAG §4c, decision produit "les deux") :
+    # chaque piece jointe de chat devient automatiquement indexable, sans
+    # action supplementaire de l'utilisateur. conversation_id/message_id ne
+    # sont pas encore connus a ce stade (le fichier n'est pas encore
+    # rattache a un message) -- voir workspace.link_files_to_message, qui
+    # les complete au moment de l'envoi. Ne doit JAMAIS faire echouer
+    # l'upload si l'indexation ne peut pas etre mise en file (RAG non
+    # configure) : best-effort, comme le reste du temps reel dans cette app.
+    try:
+        document = rag.create_document(
+            name=record["name"],
+            mime_type=mime_type,
+            size_bytes=len(content),
+            owner_user_id=user["id"],
+            source_type="attachment",
+            file_id=file_id,
+        )
+        rag_jobs.enqueue_ingestion(document["id"])
+    except Exception:
+        _logger.warning("Auto-ingestion RAG impossible pour le fichier %s", file_id, exc_info=True)
     return jsonify(ok=True, file=record)
 
 
@@ -1378,6 +1607,130 @@ def download_file_signed_route(file_id):
     if not hmac.compare_digest(expected, token):
         return _error(403, "Lien invalide.")
     return _serve_file(file_id)
+
+
+# ---------------------------------------------------------------------------
+# Documentation / RAG (mission RAG, Phase 4/7) : upload autonome (independant
+# de toute conversation, decision produit "les deux" -- voir aussi
+# l'auto-ingestion dans upload_file_route ci-dessus pour les pieces jointes
+# de chat) et listing filtre par la MEME autorisation que la recuperation
+# RAG elle-meme (librairies/rag.py::_VISIBILITY_SQL, jamais deux regles qui
+# pourraient diverger).
+# ---------------------------------------------------------------------------
+
+@workspace_bp.route("/documents", methods=["POST"])
+@limiter.limit("30 per minute")
+def upload_document_route():
+    user, err = _require_user()
+    if err:
+        return err
+    if "file" not in request.files:
+        return _error(400, "Aucun fichier recu.")
+    uploaded = request.files["file"]
+    if not uploaded.filename:
+        return _error(400, "Nom de fichier manquant.")
+
+    mime_type = uploaded.mimetype or mimetypes.guess_type(uploaded.filename)[0] or "application/octet-stream"
+    upload_extension = uploaded.filename.rsplit(".", 1)[-1].lower() if "." in uploaded.filename else ""
+    is_known_text_extension = mime_type == "application/octet-stream" and upload_extension in text_extraction.KNOWN_TEXT_EXTENSIONS
+    if mime_type not in ALLOWED_MIME_TYPES and not is_known_text_extension:
+        return _error(415, "Type de fichier non autorise.")
+
+    content = uploaded.read()
+    if not content:
+        return _error(400, "Fichier vide.")
+    if len(content) > MAX_UPLOAD_BYTES:
+        return _error(413, "Fichier trop volumineux.")
+
+    data = request.form or {}
+    is_shared = str(data.get("isShared", "")).lower() in ("1", "true", "yes")
+
+    file_id = workspace.new_id("file")
+    storage_name = _safe_storage_name(file_id, uploaded.filename)
+    storage_path = os.path.join(UPLOAD_DIR, storage_name)
+    with open(storage_path, "wb") as handle:
+        handle.write(content)
+
+    workspace.create_file_record(
+        file_id=file_id,
+        user_id=user["id"],
+        original_name=uploaded.filename[:200],
+        mime_type=mime_type,
+        size_bytes=len(content),
+        storage_reference=storage_name,
+    )
+    document = rag.create_document(
+        name=uploaded.filename[:200],
+        mime_type=mime_type,
+        size_bytes=len(content),
+        owner_user_id=user["id"],
+        source_type="standalone",
+        file_id=file_id,
+        is_shared=is_shared,
+    )
+    try:
+        rag_jobs.enqueue_ingestion(document["id"])
+    except Exception:
+        _logger.warning("Mise en file d'indexation impossible pour le document %s", document["id"], exc_info=True)
+    return jsonify(ok=True, document=document)
+
+
+@workspace_bp.route("/documents", methods=["GET"])
+def list_documents_route():
+    user, err = _require_user()
+    if err:
+        return err
+    search = request.args.get("search", "")[:200] or None
+    before = request.args.get("before") or None
+    limit = request.args.get("limit", default=30, type=int) or 30
+    documents = rag.list_visible_documents(user["id"], search=search, limit=limit, before=before)
+    return jsonify(ok=True, documents=documents)
+
+
+@workspace_bp.route("/documents/<document_id>", methods=["PATCH"])
+@limiter.limit("20 per minute")
+def rename_document_route(document_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not rag.user_can_manage_document(document_id, user["id"]):
+        return _error(403, "Seul le proprietaire peut renommer ce document.")
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name", "")).strip()[:200]
+    if not name:
+        return _error(400, "Nom invalide.")
+    return jsonify(ok=True, document=rag.rename_document(document_id, name))
+
+
+@workspace_bp.route("/documents/<document_id>", methods=["DELETE"])
+def delete_document_route(document_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not rag.user_can_manage_document(document_id, user["id"]):
+        return _error(403, "Seul le proprietaire peut supprimer ce document.")
+    deleted = rag.delete_document(document_id)
+    if not deleted:
+        return _error(404, "Document introuvable ou deja supprime.")
+    return jsonify(ok=True)
+
+
+@workspace_bp.route("/documents/<document_id>/reindex", methods=["POST"])
+@limiter.limit("10 per minute")
+def reindex_document_route(document_id):
+    user, err = _require_user()
+    if err:
+        return err
+    if not rag.user_can_manage_document(document_id, user["id"]):
+        return _error(403, "Seul le proprietaire peut reindexer ce document.")
+    document = rag.get_document(document_id)
+    if not document:
+        return _error(404, "Document introuvable.")
+    try:
+        rag_jobs.rag_queue.enqueue(rag.reindex_document, document_id)
+    except Exception:
+        return _error(503, "Reindexation impossible (file d'attente indisponible).")
+    return jsonify(ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1541,6 +1894,14 @@ def send_message_route():
         )
         if file_ids:
             workspace.link_files_to_message(user_message["id"], file_ids)
+            # Complete conversation_id/message_id sur les documents RAG deja
+            # crees a l'upload (mission RAG §4c) : c'est seulement a partir
+            # d'ici que l'autorisation "participant de cette conversation"
+            # peut s'appliquer (voir librairies/rag.py, _VISIBILITY_SQL).
+            try:
+                rag.backfill_attachment_documents(file_ids, conversation_id, user_message["id"])
+            except Exception:
+                _logger.warning("backfill_attachment_documents a echoue pour le message %s", user_message["id"], exc_info=True)
         workspace.touch_conversation(conversation_id)
 
         if is_message_mode:

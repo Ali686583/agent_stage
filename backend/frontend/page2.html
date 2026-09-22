@@ -86,6 +86,19 @@
             <div class="sidebar-list" id="ws-shared-discussions-list"></div>
           </div>
         </div>
+
+        <!-- Documentation (mission RAG §17) : sibling de .sidebar-inner,
+             DELIBEREMENT en dehors de la zone scrollable ci-dessus -- reste
+             donc toujours visible/cliquable meme quand la liste de
+             discussions devient longue, sans utiliser position:sticky
+             (aucun precedent dans cette sidebar, voir sidebar-notch qui
+             utilise deja ce meme principe "hors du scroll" pour la meme
+             raison). -->
+        <div class="sidebar-separator sidebar-documentation-separator"></div>
+        <button type="button" class="sidebar-documentation-entry" id="ws-documentation-entry">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          <span data-i18n="workspace.documentation_entry">Documentation</span>
+        </button>
       </aside>
 
       <button type="button" class="sidebar-notch" id="ws-sidebar-notch" aria-label="Fermer le menu">
@@ -119,6 +132,12 @@
             <option value="en">EN</option>
             <option value="ar">AR</option>
           </select>
+          <div class="icon-btn-wrap">
+            <button type="button" class="icon-btn" id="ws-notifications-btn" data-i18n-aria="workspace.notifications_button" aria-label="Notifications">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+              <span class="icon-btn-badge hidden" id="ws-notifications-badge">0</span>
+            </button>
+          </div>
           <button id="theme-toggle" type="button" class="theme-toggle" data-i18n-aria="theme.toggle" aria-label="Mode sombre">
             <svg class="icon-moon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
@@ -179,6 +198,12 @@
         <div class="conversation-area" id="ws-conversation-area"></div>
 
         <div class="composer-wrap">
+          <!-- Toasts de notification (mission notifications §6g/§9) : sort
+               visuellement de derriere/au-dessus de la zone de saisie puis
+               apparait AU-DESSUS de la rangee de boutons -- d'ou son
+               placement ici, juste avant .action-widgets-row, jamais un
+               overlay plein ecran. -->
+          <div class="notification-toast-stack" id="ws-notification-toasts"></div>
           <div class="action-widgets-row" id="ws-action-widgets"></div>
 
           <div class="composer" id="ws-composer">
@@ -234,6 +259,29 @@
         <button type="button" class="modal-btn" id="ws-modal-cancel" data-i18n="workspace.cancel">Annuler</button>
         <button type="button" class="modal-btn danger" id="ws-modal-confirm" data-i18n="workspace.delete">Supprimer</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Documentation (mission RAG §18) : meme coquille visuelle que le modal
+       de confirmation ci-dessus (overlay fixe, boite centree, fermeture au
+       clic sur le fond/Escape geree en JS -- voir openDocumentationModal
+       dans workspace.js), mais contenu generique (liste + recherche +
+       upload) plutot qu'un message+confirmer/annuler fige. -->
+  <div class="modal-overlay hidden" id="ws-docs-modal-overlay">
+    <div class="modal-box docs-modal-box" role="dialog" aria-modal="true" id="ws-docs-modal-box">
+      <div class="docs-modal-header">
+        <h2 data-i18n="workspace.documentation_title">Documentation</h2>
+        <button type="button" class="icon-btn" id="ws-docs-modal-close" data-i18n-aria="workspace.close" aria-label="Fermer">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <div class="docs-modal-toolbar">
+        <input type="text" id="ws-docs-search-input" data-i18n-placeholder="workspace.documentation_search_placeholder" placeholder="Rechercher un document...">
+        <input type="file" id="ws-docs-upload-input" class="hidden">
+        <button type="button" class="primary" id="ws-docs-upload-btn" data-i18n="workspace.documentation_upload">Ajouter un document</button>
+      </div>
+      <div class="docs-modal-list" id="ws-docs-list"></div>
+      <button type="button" class="link-btn hidden" id="ws-docs-load-more" data-i18n="workspace.documentation_load_more">Charger plus</button>
     </div>
   </div>
 

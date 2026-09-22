@@ -418,6 +418,27 @@ def delete_action(action_id: str) -> bool:
         return True
 
 
+def force_delete_action(action_id: str) -> bool:
+    """Suppression definitive en un clic (decision produit, bug "Supprimer
+    definitivement" : SHARED_BUTTON_CONTEXT_ID etant le seul contexte
+    d'entry_actions, un bouton atteignable depuis la recherche y est
+    quasi-toujours encore reference, donc delete_action() refusait presque
+    systematiquement avec un 409 -- feedback quasi invisible cote UI, voir
+    workspace.js showComposerError). Ce nouveau chemin detache l'action de
+    TOUS les contextes qui la referencent puis la supprime, sans jamais
+    refuser -- meme forme de transaction que purge_actions_named ci-dessous,
+    juste bornee a un seul id. Additif : delete_action()/
+    is_action_used_elsewhere() restent inchangees, toujours utilisees
+    ailleurs (ex. flux de mise a jour de version)."""
+    with _db() as conn:
+        row = conn.execute("SELECT 1 FROM actions WHERE id = %s;", (action_id,)).fetchone()
+        if not row:
+            return False
+        conn.execute("DELETE FROM entry_actions WHERE action_id = %s;", (action_id,))
+        conn.execute("DELETE FROM actions WHERE id = %s;", (action_id,))
+        return True
+
+
 class VersionConflictError(RuntimeError):
     """Levee quand expected_version ne correspond plus a la version en base :
     quelqu'un d'autre a deja modifie ce bouton partage entre-temps. L'appelant

@@ -34,6 +34,20 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "")
 RESET_TOKEN_TTL_MINUTES = int(os.environ.get("RESET_TOKEN_TTL_MINUTES", "30"))
 SESSION_TTL_DAYS = int(os.environ.get("SESSION_TTL_DAYS", "7"))
 
+# Resultat du sondage pgvector (Phase 0 RAG) : rempli une seule fois par
+# init_db(), avant toute creation de table dependante. None = pas encore
+# sonde (init_db() pas encore appelee) ; ne jamais supposer True par defaut.
+_PGVECTOR_AVAILABLE: bool | None = None
+
+
+def pgvector_available() -> bool:
+    """Vrai si `CREATE EXTENSION vector` a reussi au demarrage. A verifier
+    avant toute DDL/upsert touchant document_chunks.embedding (voir
+    librairies/rag.py) : Railway ne garantit pas que l'extension pgvector
+    soit installee sur l'instance Postgres, donc jamais suppose sans sonde
+    reelle (mission RAG, §4a)."""
+    return bool(_PGVECTOR_AVAILABLE)
+
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
@@ -46,6 +60,14 @@ def _db():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL n'est pas configuree.")
     conn = psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    if _PGVECTOR_AVAILABLE:
+        # Adaptation Python list <-> type SQL `vector` (mission RAG §4a) :
+        # sans cet enregistrement, psycopg ne sait pas convertir une liste de
+        # float en parametre `vector(1536)` ni le lire en retour. Ne
+        # s'applique que si le sondage au demarrage a reussi (voir init_db).
+        from pgvector.psycopg import register_vector
+
+        register_vector(conn)
     try:
         yield conn
         conn.commit()
@@ -68,8 +90,22 @@ def init_db() -> None:
     silencieusement le doublon (deja observe en production sur la banque de
     boutons, meme cause). Ce verrou serialise toute la migration.
     """
+    global _PGVECTOR_AVAILABLE
     with _db() as conn:
         conn.execute("SELECT pg_advisory_lock(727001727002);")
+        # Sondage pgvector (RAG, Phase 0) : DOIT s'executer avant toute DDL
+        # dependante (document_chunks.embedding, cf. _create_core_tables).
+        # Railway ne garantit pas l'extension -- jamais suppose, toujours
+        # sonde. Un CREATE EXTENSION qui echoue laisse la transaction
+        # "poisoned" cote psycopg (toute requete suivante leverait
+        # InFailedSqlTransaction) : rollback explicite immediat necessaire
+        # pour pouvoir continuer sur la MEME connexion/transaction.
+        try:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            _PGVECTOR_AVAILABLE = True
+        except Exception:
+            conn.rollback()
+            _PGVECTOR_AVAILABLE = False
         _create_core_tables(conn)
         conn.execute("SELECT pg_advisory_unlock(727001727002);")
 
@@ -362,6 +398,81 @@ def _create_core_tables(conn) -> None:
                 updated_at              TIMESTAMPTZ NOT NULL DEFAULT now()
             );
             """
+        )
+
+        # -- Documentation / RAG (mission RAG, Phase 4) -----------------------
+        # Base PRINCIPALE (pas Postgres-jg_R) : un document appartient au meme
+        # contexte que users/projects/conversations/files/messages, jamais de
+        # jointure cross-base (aucune n'existe ailleurs dans ce code).
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS documents (
+                id               TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                mime_type        TEXT,
+                size_bytes       BIGINT,
+                owner_user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                source_type      TEXT NOT NULL,
+                file_id          TEXT REFERENCES files(id) ON DELETE CASCADE,
+                message_id       TEXT REFERENCES messages(id) ON DELETE CASCADE,
+                conversation_id  TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+                project_id       TEXT REFERENCES projects(id) ON DELETE SET NULL,
+                is_shared        BOOLEAN NOT NULL DEFAULT false,
+                status           TEXT NOT NULL DEFAULT 'UPLOADED',
+                status_error     TEXT,
+                extracted_text   TEXT,
+                metadata         JSONB,
+                content_version  BIGINT NOT NULL DEFAULT 1,
+                indexed_version  BIGINT,
+                created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_owner ON documents (owner_user_id);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_status ON documents (status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_documents_conversation ON documents (conversation_id) WHERE conversation_id IS NOT NULL;")
+
+        # Colonne embedding dependante du sondage pgvector fait plus haut dans
+        # init_db() (AVANT cet appel a _create_core_tables) : jamais suppose,
+        # toujours branche sur le resultat reel.
+        embedding_column_type = "vector(1536)" if _PGVECTOR_AVAILABLE else "DOUBLE PRECISION[]"
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id            TEXT PRIMARY KEY,
+                document_id   TEXT NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+                chunk_index   INT NOT NULL,
+                content       TEXT NOT NULL,
+                embedding     {embedding_column_type},
+                created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_document_chunks_document ON document_chunks (document_id);")
+
+        # -- Notifications (mentions/reponses, mission notifications Phase 6) -
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notifications (
+                id                 TEXT PRIMARY KEY,
+                seq                BIGSERIAL,
+                recipient_user_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                actor_user_id      TEXT REFERENCES users(id) ON DELETE SET NULL,
+                type               TEXT NOT NULL,
+                conversation_id    TEXT REFERENCES conversations(id) ON DELETE CASCADE,
+                message_id         TEXT REFERENCES messages(id) ON DELETE CASCADE,
+                preview_text       TEXT,
+                read_at            TIMESTAMPTZ,
+                created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_recipient ON notifications (recipient_user_id, created_at DESC);"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_notifications_unread ON notifications (recipient_user_id) WHERE read_at IS NULL;"
         )
 
 

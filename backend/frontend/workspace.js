@@ -240,6 +240,21 @@
     dom.modalMessage = document.getElementById("ws-modal-message");
     dom.modalCancel = document.getElementById("ws-modal-cancel");
     dom.modalConfirm = document.getElementById("ws-modal-confirm");
+
+    // Notifications (mission notifications, Phase 6)
+    dom.notificationsBtn = document.getElementById("ws-notifications-btn");
+    dom.notificationsBadge = document.getElementById("ws-notifications-badge");
+    dom.notificationToasts = document.getElementById("ws-notification-toasts");
+
+    // Documentation / RAG (mission RAG, Phase 4/7)
+    dom.documentationEntry = document.getElementById("ws-documentation-entry");
+    dom.docsModalOverlay = document.getElementById("ws-docs-modal-overlay");
+    dom.docsModalClose = document.getElementById("ws-docs-modal-close");
+    dom.docsSearchInput = document.getElementById("ws-docs-search-input");
+    dom.docsUploadInput = document.getElementById("ws-docs-upload-input");
+    dom.docsUploadBtn = document.getElementById("ws-docs-upload-btn");
+    dom.docsList = document.getElementById("ws-docs-list");
+    dom.docsLoadMore = document.getElementById("ws-docs-load-more");
   }
 
   // ---------------------------------------------------------------------
@@ -913,18 +928,23 @@
         type: "button",
         class: "danger-text",
         text: t("workspace.delete_button_definitively"),
-        onclick: async (event) => {
+        onclick: (event) => {
           event.stopPropagation();
           closeFixedMenu();
-          // Suppression DEFINITIVE de la banque (pas juste "Retirer" de mon
-          // interface) : le serveur refuse si cette action est encore
-          // utilisee ailleurs (voir delete_action_bank_route / delete_action).
-          const { ok, data } = await api(`/action-bank/${action.id}`, { method: "DELETE" });
-          if (!ok || !data.ok) {
-            showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
-            return;
-          }
-          if (onDeleted) onDeleted();
+          // Suppression DEFINITIVE en un clic (mission "Supprimer
+          // definitivement" §3, decision produit) : detache de la banque
+          // partagee ET supprime le workflow n8n associe, sans possibilite
+          // d'annulation -- d'ou une confirmation explicite avant d'appeler
+          // l'API (reprend le modal existant, deja utilise ailleurs pour les
+          // autres suppressions destructives de l'app).
+          showConfirmModal(t("workspace.delete_button_confirm"), async () => {
+            const { ok, data } = await api(`/action-bank/${action.id}`, { method: "DELETE" });
+            if (!ok || !data.ok) {
+              showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+              return;
+            }
+            if (onDeleted) onDeleted();
+          });
         },
       })
     );
@@ -1626,6 +1646,10 @@
 
   function renderUserMessageActions(message) {
     const wrap = el("div", { class: "message-actions message-actions-user" });
+    // Bouton Copier egalement sur les messages utilisateur (mission §6,
+    // "toutes les bulles/messages dont le contenu est copiable") : meme
+    // helper que pour les reponses assistant, voir buildCopyButton.
+    wrap.appendChild(buildCopyButton(message));
     const replyBtn = el("button", {
       type: "button",
       class: "msg-action-link",
@@ -1735,14 +1759,23 @@
     }
   }
 
-  function renderMessageActions(message) {
-    const wrap = el("div", { class: "message-actions" });
+  // Extrait de renderMessageActions (mission §6) : reutilise pour les
+  // messages utilisateur ET assistant, jamais deux implementations qui
+  // pourraient diverger (copyMessageContent/copyIconSvg/checkIconSvg sont
+  // deja entierement generiques, independants du role).
+  function buildCopyButton(message) {
     const copyBtn = el(
       "button",
       { type: "button", class: "msg-action-icon-btn", "aria-label": t("workspace.copy_response"), title: t("workspace.copy_response") },
       [copyIconSvg()]
     );
     copyBtn.addEventListener("click", () => copyMessageContent(message, copyBtn));
+    return copyBtn;
+  }
+
+  function renderMessageActions(message) {
+    const wrap = el("div", { class: "message-actions" });
+    const copyBtn = buildCopyButton(message);
     const replyBtn = el("button", {
       type: "button",
       class: "msg-action-link",
@@ -1803,12 +1836,21 @@
   }
 
   function fileChipReadOnly(file) {
-    const nameSpan = el("span", { class: "file-chip-name", text: `📎 ${file.name}` });
-    const nameLink = el(
-      "a",
-      { href: `${API}/files/${file.id}`, target: "_blank", rel: "noopener", style: "color:inherit;text-decoration:none;flex:1;min-width:0;" },
-      [nameSpan]
-    );
+    // Correctif overflow (mission §5) : la classe file-chip-name (ellipsis
+    // CSS) DOIT etre portee par l'element flex-item lui-meme (ce <a>), pas
+    // par un <span> imbrique dedans -- overflow/text-overflow n'ont aucun
+    // effet sur une boite inline simple qui n'est pas elle-meme l'item flex
+    // (voir .reply-context-text/.reply-preview-text pour l'analogue qui
+    // fonctionne deja). `title` restitue le nom complet au survol.
+    const nameLink = el("a", {
+      href: `${API}/files/${file.id}`,
+      target: "_blank",
+      rel: "noopener",
+      class: "file-chip-name",
+      title: file.name,
+      text: `📎 ${file.name}`,
+      style: "color:inherit;text-decoration:none;",
+    });
     const chip = el("div", { class: "file-chip", style: "position:relative;" }, [nameLink]);
     if (file.uploadedByUserId === state.user.id) {
       chip.appendChild(
@@ -1820,7 +1862,8 @@
             event.preventDefault();
             event.stopPropagation();
             openFileMenu(file, chip, (newName) => {
-              nameSpan.textContent = `📎 ${newName}`;
+              nameLink.textContent = `📎 ${newName}`;
+              nameLink.title = newName;
             });
           },
         })
@@ -2930,7 +2973,11 @@
     dom.fileChips.innerHTML = "";
     state.attachments.forEach((attachment) => {
       const chip = el("div", { class: `file-chip ${attachment.status === "failed" ? "failed" : ""}` }, [
-        el("span", { class: "file-chip-name", text: `📎 ${attachment.name}${attachment.status === "uploading" ? " (" + t("workspace.uploading") + ")" : ""}` }),
+        el("span", {
+          class: "file-chip-name",
+          title: attachment.name,
+          text: `📎 ${attachment.name}${attachment.status === "uploading" ? " (" + t("workspace.uploading") + ")" : ""}`,
+        }),
         el("button", {
           type: "button",
           "aria-label": t("workspace.remove"),
@@ -3362,6 +3409,272 @@
   // Init
   // ---------------------------------------------------------------------
 
+  // ---------------------------------------------------------------------
+  // Notifications (mission notifications, Phase 6) : mentions + reponses,
+  // persistees cote serveur + poussees en temps reel sur un canal PAR
+  // UTILISATEUR (independant de la conversation actuellement ouverte, voir
+  // connectNotificationsRealtime ci-dessous -- meme principe que
+  // connectRealtime mais un seul flux ouvert pour toute la session, pas un
+  // par conversation).
+  // ---------------------------------------------------------------------
+
+  function updateNotificationsBadge(count) {
+    dom.notificationsBadge.textContent = String(count);
+    dom.notificationsBadge.classList.toggle("hidden", !count);
+  }
+
+  async function refreshNotificationsBadge() {
+    const { ok, data } = await api("/notifications?limit=1");
+    if (ok && data.ok) updateNotificationsBadge(data.unreadCount || 0);
+  }
+
+  function notificationRowLabel(notification) {
+    const key = notification.type === "mention" ? "workspace.notification_mention" : "workspace.notification_reply";
+    return t(key).replace("{name}", notification.actorName || "");
+  }
+
+  async function renderNotificationsList(listBox) {
+    listBox.innerHTML = "";
+    const { ok, data } = await api("/notifications?limit=20");
+    if (!ok || !data.ok) return;
+    updateNotificationsBadge(data.unreadCount || 0);
+    if (!data.notifications.length) {
+      listBox.appendChild(el("div", { class: "notifications-empty", text: t("workspace.notifications_empty") }));
+      return;
+    }
+    data.notifications.forEach((notification) => {
+      const row = el(
+        "button",
+        { type: "button", class: `notification-row ${notification.readAt ? "" : "unread"}` },
+        [
+          el("span", { class: "notification-row-title", text: notificationRowLabel(notification) }),
+          el("span", { class: "notification-row-preview", text: notification.previewText || "" }),
+          el("span", { class: "notification-row-time", text: formatDate(notification.createdAt) }),
+        ]
+      );
+      row.addEventListener("click", async () => {
+        if (!notification.readAt) {
+          await api(`/notifications/${notification.id}/read`, { method: "POST" });
+        }
+        closeContextMenu();
+        if (notification.conversationId) openConversation(notification.conversationId);
+      });
+      listBox.appendChild(row);
+    });
+  }
+
+  function openNotificationsMenu() {
+    closeContextMenu();
+    const menu = el("div", { class: "item-context-menu open open-up notifications-menu" });
+    const header = el("div", { class: "notifications-menu-header" }, [
+      el("h3", { text: t("workspace.notifications_title") }),
+      el("button", {
+        type: "button",
+        class: "link-btn",
+        text: t("workspace.notifications_mark_all_read"),
+        onclick: async (event) => {
+          event.stopPropagation();
+          await api("/notifications/read-all", { method: "POST" });
+          renderNotificationsList(listBox);
+        },
+      }),
+    ]);
+    const listBox = el("div", { class: "notifications-list" });
+    menu.appendChild(header);
+    menu.appendChild(listBox);
+    dom.notificationsBtn.parentElement.appendChild(menu);
+    activeContextMenu = menu;
+    setTimeout(() => document.addEventListener("click", closeContextMenu, { once: true }), 0);
+    renderNotificationsList(listBox);
+  }
+
+  function wireNotifications() {
+    dom.notificationsBtn.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openNotificationsMenu();
+    });
+    refreshNotificationsBadge();
+  }
+
+  function showNotificationToast(notification) {
+    const toast = el("div", { class: "notification-toast" }, [
+      el("span", { class: "notification-toast-title", text: notificationRowLabel(notification) }),
+      el("span", { class: "notification-toast-preview", text: notification.previewText || "" }),
+    ]);
+    toast.addEventListener("click", () => {
+      if (notification.conversationId) openConversation(notification.conversationId);
+      toast.remove();
+    });
+    dom.notificationToasts.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add("visible"));
+    setTimeout(() => {
+      toast.classList.remove("visible");
+      setTimeout(() => toast.remove(), 250);
+    }, 4500);
+  }
+
+  let notificationsEventSource = null;
+
+  function connectNotificationsRealtime() {
+    if (notificationsEventSource) notificationsEventSource.close();
+    notificationsEventSource = new EventSource(`${API}/notifications/events`, { withCredentials: true });
+    notificationsEventSource.addEventListener("notification.created", (event) => {
+      let notification;
+      try {
+        notification = JSON.parse(event.data);
+      } catch (error) {
+        return;
+      }
+      refreshNotificationsBadge();
+      showNotificationToast({
+        type: notification.type,
+        actorName: notification.actorName,
+        previewText: notification.previewText,
+        conversationId: notification.conversationId,
+      });
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // Documentation / RAG (mission RAG, Phase 4/7) : bibliotheque des
+  // documents auxquels l'utilisateur courant a acces -- meme filtre
+  // d'autorisation que la recuperation RAG elle-meme (cote serveur, voir
+  // librairies/rag.py). Metadonnees uniquement, jamais le contenu complet
+  // (mission §18, "ne jamais charger inutilement tous les fichiers").
+  // ---------------------------------------------------------------------
+
+  const docsState = { search: "", before: null, loading: false };
+
+  function docStatusLabel(status) {
+    const key = {
+      UPLOADED: "workspace.documentation_status_uploaded",
+      PROCESSING: "workspace.documentation_status_processing",
+      READY: "workspace.documentation_status_ready",
+      FAILED: "workspace.documentation_status_failed",
+    }[status];
+    return key ? t(key) : status;
+  }
+
+  function docIconSvg() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "18");
+    svg.setAttribute("height", "18");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("class", "doc-row-icon");
+    svg.innerHTML = '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>';
+    return svg;
+  }
+
+  function renderDocumentRow(doc) {
+    const row = el("div", { class: "doc-row" }, [
+      docIconSvg(),
+      el("div", { class: "doc-row-main" }, [
+        el("div", { class: "doc-row-name", text: doc.name, title: doc.name }),
+        el("div", { class: "doc-row-meta", text: formatDate(doc.createdAt) }),
+      ]),
+      el("span", { class: `doc-row-status status-${doc.status}`, text: docStatusLabel(doc.status) }),
+    ]);
+    const actions = el("div", { class: "doc-row-actions" });
+    actions.appendChild(
+      el("button", {
+        type: "button",
+        class: "link-btn",
+        text: t("workspace.documentation_open"),
+        onclick: () => window.open(`${API}/files/${doc.id}`, "_blank"),
+      })
+    );
+    if (doc.isOwner) {
+      actions.appendChild(
+        el("button", {
+          type: "button",
+          class: "link-btn",
+          text: t("workspace.documentation_reindex"),
+          onclick: async (event) => {
+            event.target.disabled = true;
+            await api(`/documents/${doc.id}/reindex`, { method: "POST" });
+            loadDocuments(true);
+          },
+        })
+      );
+      actions.appendChild(
+        el("button", {
+          type: "button",
+          class: "link-btn danger-text",
+          text: t("workspace.delete"),
+          onclick: async () => {
+            const { ok, data } = await api(`/documents/${doc.id}`, { method: "DELETE" });
+            if (ok && data.ok) loadDocuments(true);
+          },
+        })
+      );
+    }
+    row.appendChild(actions);
+    return row;
+  }
+
+  async function loadDocuments(reset) {
+    if (docsState.loading) return;
+    docsState.loading = true;
+    if (reset) {
+      docsState.before = null;
+      dom.docsList.innerHTML = "";
+    }
+    const params = new URLSearchParams({ limit: "30" });
+    if (docsState.search) params.set("search", docsState.search);
+    if (docsState.before) params.set("before", docsState.before);
+    const { ok, data } = await api(`/documents?${params.toString()}`);
+    docsState.loading = false;
+    if (!ok || !data.ok) return;
+    // NB : le fichier ELEMENT (doc.id) reste attache a son message d'origine
+    // dans la discussion -- ceci n'est qu'un listing metadonnees, jamais un
+    // chargement du contenu complet (mission §18).
+    data.documents.forEach((doc) => dom.docsList.appendChild(renderDocumentRow(doc)));
+    dom.docsLoadMore.classList.toggle("hidden", data.documents.length < 30);
+    if (data.documents.length) {
+      docsState.before = data.documents[data.documents.length - 1].createdAt;
+    }
+  }
+
+  let docsSearchDebounce = null;
+
+  function wireDocumentation() {
+    dom.documentationEntry.addEventListener("click", () => {
+      dom.docsModalOverlay.classList.remove("hidden");
+      loadDocuments(true);
+    });
+    dom.docsModalClose.addEventListener("click", () => dom.docsModalOverlay.classList.add("hidden"));
+    dom.docsModalOverlay.addEventListener("click", (event) => {
+      if (event.target === dom.docsModalOverlay) dom.docsModalOverlay.classList.add("hidden");
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !dom.docsModalOverlay.classList.contains("hidden")) {
+        dom.docsModalOverlay.classList.add("hidden");
+      }
+    });
+    dom.docsSearchInput.addEventListener("input", () => {
+      clearTimeout(docsSearchDebounce);
+      docsSearchDebounce = setTimeout(() => {
+        docsState.search = dom.docsSearchInput.value.trim();
+        loadDocuments(true);
+      }, 300);
+    });
+    dom.docsLoadMore.addEventListener("click", () => loadDocuments(false));
+    dom.docsUploadBtn.addEventListener("click", () => dom.docsUploadInput.click());
+    dom.docsUploadInput.addEventListener("change", async (event) => {
+      const file = event.target.files[0];
+      dom.docsUploadInput.value = "";
+      if (!file) return;
+      const formData = new FormData();
+      formData.append("file", file);
+      const { ok, data } = await api("/documents", { method: "POST", body: formData });
+      if (ok && data.ok) loadDocuments(true);
+      else showComposerError(data && data.error ? data.error : t("workspace.error_generic"));
+    });
+  }
+
   async function init() {
     cacheDom();
     const authed = await loadUser();
@@ -3377,6 +3690,9 @@
     wireConnectionsButton();
     wireDictation();
     wireGoogleDriveOption();
+    wireNotifications();
+    wireDocumentation();
+    connectNotificationsRealtime();
     updateConnectionsBadge();
     handleGoogleDriveRedirectStatus();
     refreshGoogleDriveOption();
