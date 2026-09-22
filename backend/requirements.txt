@@ -15,4 +15,10 @@ openpyxl==3.1.5
 python-pptx==1.0.2
 xlrd==2.0.1
 openai==1.51.0
+# Epingle explicitement (bug trouve en test E2E reel) : openai==1.51.0
+# construit son client interne avec un parametre "proxies" que httpx a
+# retire en 0.28 ("Client.__init__() got an unexpected keyword argument
+# 'proxies'"), et rien d'autre dans requirements.txt ne contraignait httpx
+# -- Railway installait donc la derniere version (0.28+), incompatible.
+httpx==0.27.2
 pgvector==0.3.6
