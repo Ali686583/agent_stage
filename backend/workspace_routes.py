@@ -1683,7 +1683,9 @@ def list_documents_route():
     search = request.args.get("search", "")[:200] or None
     before = request.args.get("before") or None
     limit = request.args.get("limit", default=30, type=int) or 30
-    documents = rag.list_visible_documents(user["id"], search=search, limit=limit, before=before)
+    documents = rag.list_visible_documents(
+        user["id"], search=search, limit=limit, before=before, is_admin=user.get("role") == "admin"
+    )
     return jsonify(ok=True, documents=documents)
 
 
@@ -1693,8 +1695,8 @@ def rename_document_route(document_id):
     user, err = _require_user()
     if err:
         return err
-    if not rag.user_can_manage_document(document_id, user["id"]):
-        return _error(403, "Seul le proprietaire peut renommer ce document.")
+    if not rag.user_can_manage_document(document_id, user["id"], is_admin=user.get("role") == "admin"):
+        return _error(403, "Seul le proprietaire ou un administrateur peut renommer ce document.")
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "")).strip()[:200]
     if not name:
@@ -1707,8 +1709,8 @@ def delete_document_route(document_id):
     user, err = _require_user()
     if err:
         return err
-    if not rag.user_can_manage_document(document_id, user["id"]):
-        return _error(403, "Seul le proprietaire peut supprimer ce document.")
+    if not rag.user_can_manage_document(document_id, user["id"], is_admin=user.get("role") == "admin"):
+        return _error(403, "Seul le proprietaire ou un administrateur peut supprimer ce document.")
     deleted = rag.delete_document(document_id)
     if not deleted:
         return _error(404, "Document introuvable ou deja supprime.")
@@ -1721,8 +1723,8 @@ def reindex_document_route(document_id):
     user, err = _require_user()
     if err:
         return err
-    if not rag.user_can_manage_document(document_id, user["id"]):
-        return _error(403, "Seul le proprietaire peut reindexer ce document.")
+    if not rag.user_can_manage_document(document_id, user["id"], is_admin=user.get("role") == "admin"):
+        return _error(403, "Seul le proprietaire ou un administrateur peut reindexer ce document.")
     document = rag.get_document(document_id)
     if not document:
         return _error(404, "Document introuvable.")

@@ -234,7 +234,9 @@ def _public_document(row: dict) -> dict:
     }
 
 
-def list_visible_documents(user_id: str, *, search: str | None = None, limit: int = 30, before: str | None = None) -> list[dict]:
+def list_visible_documents(
+    user_id: str, *, search: str | None = None, limit: int = 30, before: str | None = None, is_admin: bool = False
+) -> list[dict]:
     """Liste "Documentation" (mission §7) : reutilise la MEME regle d'ACCES
     que search_documents (_ACCESS_SQL) -- jamais de derive entre "qui peut
     voir ce document dans la bibliotheque" et "qui peut le recuperer via le
@@ -281,6 +283,11 @@ def list_visible_documents(user_id: str, *, search: str | None = None, limit: in
             "createdAt": r["created_at"].isoformat() if r.get("created_at") else None,
             "updatedAt": r["updated_at"].isoformat() if r.get("updated_at") else None,
             "isOwner": r["owner_user_id"] == user_id,
+            # Determine cote serveur (jamais au frontend de decider tout
+            # seul qui peut gerer quoi) : proprietaire OU admin -- meme
+            # bypass que user_can_manage_document, expose ici pour que
+            # renderDocumentRow n'ait qu'a lire un seul champ.
+            "canManage": r["owner_user_id"] == user_id or is_admin,
         }
         for r in rows
     ]
@@ -292,11 +299,21 @@ def rename_document(document_id: str, name: str) -> dict | None:
     return get_document(document_id)
 
 
-def user_can_manage_document(document_id: str, user_id: str) -> bool:
-    """Rename/supprime/reindexe : uniquement le proprietaire (§7, "avec
-    autorisation explicite"). Volontairement PLUS strict que la simple
-    visibilite (un participant de conversation peut LIRE un document sans
-    pouvoir le supprimer)."""
+def user_can_manage_document(document_id: str, user_id: str, is_admin: bool = False) -> bool:
+    """Rename/supprime/reindexe : le proprietaire, OU un admin applicatif
+    (§7, "avec autorisation explicite"). Volontairement PLUS strict que la
+    simple visibilite (un participant de conversation peut LIRE un document
+    sans pouvoir le supprimer) -- mais aligne sur le meme bypass admin deja
+    utilise partout ailleurs dans l'app pour la moderation (conversations,
+    action-bank, connections : `user.get("role") == "admin"`, voir
+    workspace.delete_conversation/connections_bank.delete_connection).
+    Documentation etait jusqu'ici la seule ressource supprimable SANS ce
+    bypass -- ajoute ici pour ne pas diverger (bug trouve en usage reel :
+    l'admin ne pouvait pas nettoyer les documents de test d'autres comptes)."""
+    if is_admin:
+        with _db() as conn:
+            row = conn.execute("SELECT 1 FROM documents WHERE id = %s", (document_id,)).fetchone()
+        return bool(row)
     with _db() as conn:
         row = conn.execute("SELECT owner_user_id FROM documents WHERE id = %s", (document_id,)).fetchone()
     return bool(row) and row["owner_user_id"] == user_id

@@ -3591,7 +3591,15 @@
         onclick: () => window.open(`${API}/files/${doc.id}`, "_blank"),
       })
     );
-    if (doc.isOwner) {
+    // canManage = proprietaire OU admin (calcule cote serveur, voir
+    // rag.list_visible_documents) -- avant, seul isOwner etait teste ici,
+    // donc un admin ne pouvait ni renommer ni reindexer ni SUPPRIMER un
+    // document appartenant a un autre compte depuis la Documentation
+    // (bug releve en usage reel : boutons absents pour nettoyer les
+    // documents d'autres comptes). Les routes backend acceptaient deja le
+    // meme bypass admin que partout ailleurs (conversations, action-bank,
+    // connections) -- seul le frontend n'exposait pas les boutons.
+    if (doc.canManage) {
       actions.appendChild(
         el("button", {
           type: "button",
@@ -3610,6 +3618,7 @@
           class: "link-btn danger-text",
           text: t("workspace.delete"),
           onclick: async () => {
+            if (!window.confirm(t("workspace.documentation_delete_confirm").replace("{name}", doc.name))) return;
             const { ok, data } = await api(`/documents/${doc.id}`, { method: "DELETE" });
             if (ok && data.ok) loadDocuments(true);
           },
