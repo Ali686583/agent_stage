@@ -21,6 +21,7 @@ signee (voir jobs.py/rag.py pour le contraste, worker sans acces disque).
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import uuid
@@ -94,6 +95,67 @@ def _set_cell(sheet, row: int, column: int, value) -> None:
     filter_rows, ou None explicite pour vider une cellule via set_cell/
     set_range) est ecrite."""
     sheet.cell(row=row, column=column).value = value
+
+
+_CELL_REF_RE = re.compile(r"\$?([A-Za-z]{1,3})\$?(\d+)")
+_SAFE_BINOPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b, ast.Div: lambda a, b: a / b}
+
+
+def _safe_eval_node(node):
+    """Evalue un noeud AST restreint aux 4 operations arithmetiques et aux
+    constantes numeriques -- jamais un eval() general (voir
+    _get_effective_value)."""
+    if isinstance(node, ast.Expression):
+        return _safe_eval_node(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _SAFE_BINOPS:
+        return _SAFE_BINOPS[type(node.op)](_safe_eval_node(node.left), _safe_eval_node(node.right))
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        return -_safe_eval_node(node.operand)
+    raise ValueError("expression non supportee")
+
+
+def _get_effective_value(sheet, row: int, column: int, _resolving: frozenset = frozenset()):
+    """Valeur 'utile' d'une cellule pour un tri/filtre (mission Excel §5.2,
+    sort_range/filter_rows) : si la cellule contient une FORMULE, la renvoie
+    telle quelle SANS l'evaluer par defaut, car openpyxl (charge en
+    data_only=False, mission §5.1, pour preserver les formules) ne calcule
+    jamais les formules qu'il ecrit lui-meme -- un classeur genere par cet
+    outil n'a jamais ete ouvert par un vrai Excel, donc aucune valeur mise en
+    cache n'existe.
+    Bug trouve en test E2E reel (reproduit) : add_column avec formule puis
+    filter_rows/sort_range sur cette meme colonne echouait silencieusement
+    (filter_rows renvoyait toujours 0 resultat, `float(\"=B2-C2\")` levant une
+    exception avalee par le bloc try/except ; sort_range triait sur la
+    chaine de formule brute au lieu de la valeur numerique). On tente donc
+    d'evaluer nous-memes les formules arithmetiques simples (+-*/, references
+    de cellules) generees par write_formula/add_column, recursivement sur les
+    cellules referencees. Retombe sur la valeur brute (formule ou None) des
+    que l'evaluation echoue (fonction Excel non geree, reference circulaire,
+    cellule non numerique...) -- jamais d'exception propagee."""
+    cell = sheet.cell(row=row, column=column)
+    value = cell.value
+    if not (isinstance(value, str) and value.startswith("=")):
+        return value
+    key = (sheet.title, row, column)
+    if key in _resolving:
+        return value
+    resolving = _resolving | {key}
+
+    def _replace(match: "re.Match[str]") -> str:
+        try:
+            col_idx = column_index_from_string(match.group(1).upper())
+        except ValueError:
+            return match.group(0)
+        resolved = _get_effective_value(sheet, int(match.group(2)), col_idx, resolving)
+        return repr(float(resolved)) if isinstance(resolved, (int, float)) else match.group(0)
+
+    substituted = _CELL_REF_RE.sub(_replace, value[1:])
+    try:
+        return _safe_eval_node(ast.parse(substituted, mode="eval"))
+    except Exception:
+        return value
 
 
 def _parse_cell_ref(ref: str) -> tuple[int, int]:
@@ -201,6 +263,31 @@ def _apply_op_write_formula(sheet, op: dict) -> str:
     return f"formule ecrite en {cell}"
 
 
+def _shift_formula_row(value, old_row: int, new_row: int):
+    """Quand une ligne est deplacee (sort_range) ou copiee vers une nouvelle
+    position (filter_rows, copy_range), une formule de cette ligne qui
+    reference une AUTRE cellule de la MEME ligne d'origine -- le seul style
+    de formule que ce module ecrit lui-meme, via le gabarit {row} de
+    add_column/write_formula, ex: \"=B{row}-C{row}\" -- doit suivre le
+    deplacement pour rester exacte. Sans ce reajustement (bug trouve en test
+    E2E reel), la formule continue de pointer vers l'ancienne ligne : apres
+    un tri, \"=B5-C5\" restait ecrite dans la ligne 2 alors que les donnees de
+    la ligne 5 d'origine avaient ete deplacees ailleurs, donnant un resultat
+    faux si le fichier est rouvert dans un vrai Excel (qui recalcule). Les
+    references vers une AUTRE ligne (totaux, constantes...) ne sont jamais
+    modifiees -- seules celles qui pointaient exactement sur old_row le
+    sont."""
+    if old_row == new_row or not isinstance(value, str) or not value.startswith("="):
+        return value
+
+    def _replace(match: "re.Match[str]") -> str:
+        if int(match.group(2)) == old_row:
+            return f"{match.group(1)}{new_row}"
+        return match.group(0)
+
+    return _CELL_REF_RE.sub(_replace, value)
+
+
 def _apply_op_copy_range(sheet, op: dict) -> str:
     source_range = str(op.get("sourceRange") or "")
     dest_cell = str(op.get("destCell") or "")
@@ -209,8 +296,9 @@ def _apply_op_copy_range(sheet, op: dict) -> str:
     copied = 0
     for r in range(end_row - start_row + 1):
         for c in range(end_col - start_col + 1):
-            value = sheet.cell(row=start_row + r, column=start_col + c).value
-            _set_cell(sheet, dest_row + r, dest_col + c, value)
+            source_row = start_row + r
+            value = sheet.cell(row=source_row, column=start_col + c).value
+            _set_cell(sheet, dest_row + r, dest_col + c, _shift_formula_row(value, source_row, dest_row + r))
             copied += 1
     return f"plage {source_range} copiee vers {dest_cell} ({copied} cellules)"
 
@@ -240,14 +328,23 @@ def _apply_op_sort_range(sheet, op: dict) -> str:
     has_header = bool(op.get("hasHeader", True))
     start_col, start_row, end_col, end_row = _parse_range_ref(range_ref)
     data_start = start_row + 1 if has_header else start_row
-    rows = [
-        [sheet.cell(row=r, column=c).value for c in range(start_col, end_col + 1)]
+    key_col_index = start_col + key_column - 1
+    # Cle de tri = valeur EFFECTIVE (formule evaluee si possible, cf.
+    # _get_effective_value) mais les lignes reecrites gardent leurs valeurs
+    # BRUTES (formules incluses) : seul l'ORDRE change, jamais le contenu.
+    entries = [
+        (
+            _get_effective_value(sheet, r, key_col_index),
+            r,
+            [sheet.cell(row=r, column=c).value for c in range(start_col, end_col + 1)],
+        )
         for r in range(data_start, end_row + 1)
     ]
-    rows.sort(key=lambda r: (r[key_column - 1] is None, r[key_column - 1]), reverse=not ascending)
-    for i, row_values in enumerate(rows):
+    entries.sort(key=lambda e: (e[0] is None or isinstance(e[0], str), e[0]), reverse=not ascending)
+    for i, (_, orig_row, row_values) in enumerate(entries):
+        new_row = data_start + i
         for c, value in enumerate(row_values):
-            _set_cell(sheet, data_start + i, start_col + c, value)
+            _set_cell(sheet, new_row, start_col + c, _shift_formula_row(value, orig_row, new_row))
     return f"plage {range_ref} triee sur la colonne {key_column} ({'croissant' if ascending else 'decroissant'})"
 
 
@@ -293,10 +390,14 @@ def _apply_op_filter_rows(sheet, op: dict) -> str:
     data_start = start_row + 1 if has_header else start_row
     matched = 0
     for r in range(data_start, end_row + 1):
-        cell_value = sheet.cell(row=r, column=column).value
+        # Valeur EFFECTIVE (formule evaluee si possible) pour la comparaison
+        # -- cf. _get_effective_value : comparer la chaine de formule brute
+        # a `value` echouait silencieusement (bug trouve en test E2E reel).
+        cell_value = _get_effective_value(sheet, r, column)
         if matches(cell_value):
             for c in range(start_col, end_col + 1):
-                _set_cell(result_sheet, out_row, c - start_col + 1, sheet.cell(row=r, column=c).value)
+                raw_value = sheet.cell(row=r, column=c).value
+                _set_cell(result_sheet, out_row, c - start_col + 1, _shift_formula_row(raw_value, r, out_row))
             out_row += 1
             matched += 1
     return f"{matched} ligne(s) filtree(s) vers la nouvelle feuille '{result_sheet.title}'"

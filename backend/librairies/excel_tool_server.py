@@ -42,6 +42,41 @@ def _pending_key(run_id: str) -> str:
     return f"excel-pending:{run_id}"
 
 
+def _chain_key(run_id: str) -> str:
+    return f"excel-chain:{run_id}"
+
+
+def _resolve_chained_file_id(run_id: str, file_id: str) -> str:
+    """Redirection automatique de chainage (bug observe en test E2E reel,
+    reproduit et toujours present malgre l'indice textuel deja ajoute a la
+    reponse de l'outil, cf. summary_text plus bas) : quand on demande a
+    l'Agent d'enchainer plusieurs modifications Excel dans le MEME tour de
+    conversation, il continue frequemment a renvoyer le fileId D'ORIGINE
+    pour CHAQUE appel plutot que d'utiliser le nouveau fileId indique dans la
+    reponse precedente -- verifie sur une execution n8n reelle
+    (includeData=true) : les 3 appels d'un meme tour utilisaient tous et
+    exactement le meme fileId d'origine. Un indice en texte libre dans la
+    reponse de l'outil n'est pas fiable (le modele ne le relit pas toujours
+    avant de formuler l'appel suivant). On maintient donc cote serveur, pour
+    la duree de CE run uniquement, une table fileId -> dernier resultat
+    connu pour ce fileId : si le fileId demande a deja ete modifie une fois
+    pendant ce run, on redirige silencieusement vers son dernier resultat au
+    lieu d'operer (a nouveau, a tort) sur l'original."""
+    if _client is None:
+        return file_id
+    latest = _client.hget(_chain_key(run_id), file_id)
+    return latest or file_id
+
+
+def _record_chained_file(run_id: str, requested_file_id: str, new_file_id: str) -> None:
+    if _client is None:
+        return
+    key = _chain_key(run_id)
+    _client.hset(key, requested_file_id, new_file_id)
+    _client.hset(key, new_file_id, new_file_id)  # identite : un id deja "a jour" se resout vers lui-meme
+    _client.expire(key, _PENDING_TTL_SECONDS)
+
+
 def register_session(session_id: str, user_id: str, run_id: str) -> None:
     if _client is None:
         return
@@ -167,11 +202,13 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
     context = get_session_context(session_id)
     if not context:
         return {"content": [{"type": "text", "text": "edit_excel error: session not authorized."}], "isError": True}
-    file_id = str((arguments or {}).get("fileId") or "").strip()
+    requested_file_id = str((arguments or {}).get("fileId") or "").strip()
     sheet_name = (arguments or {}).get("sheetName")
     operation = (arguments or {}).get("operation") or {}
-    if not file_id:
+    if not requested_file_id:
         return {"content": [{"type": "text", "text": "edit_excel error: fileId is required."}], "isError": True}
+    # Redirection automatique de chainage -- voir _resolve_chained_file_id.
+    file_id = _resolve_chained_file_id(context["runId"], requested_file_id)
     try:
         result = excel_tool.apply_edit(file_id, context["userId"], sheet_name, operation)
     except excel_tool.ExcelToolError as exc:
@@ -180,19 +217,22 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
         return {"content": [{"type": "text", "text": f"edit_excel failed (unexpected error): {str(exc)[:200]}"}], "isError": True}
 
     push_pending_file(context["runId"], result["newFileId"])
-    # Indice de chainage (bug observe en test E2E reel) : sans ceci, un Agent
-    # a qui on demande plusieurs modifications successives ne sait pas
-    # comment continuer sur SON PROPRE resultat precedent -- chaque appel
-    # part du fileId d'origine, ce qui produit plusieurs fichiers isoles
-    # incoherents entre eux (constate : set_cell puis add_row appeles
-    # separement sur le fichier ORIGINAL, jamais l'un sur le resultat de
-    # l'autre). Le nouveau fileId est donc explicitement donne en retour
-    # pour que l'Agent puisse l'utiliser comme fileId du prochain appel s'il
-    # doit encore modifier ce fichier.
+    _record_chained_file(context["runId"], requested_file_id, result["newFileId"])
+    chain_note = (
+        f" (poursuite automatique sur le dernier resultat de ce fichier dans cette conversation, "
+        f"{file_id}, plutot que sur {requested_file_id})"
+        if file_id != requested_file_id else ""
+    )
+    # Indice de chainage textuel : conserve en complement (jamais suffisant a
+    # lui seul, cf. _resolve_chained_file_id -- verifie en test E2E reel que
+    # le modele ne le relit pas toujours avant l'appel suivant), au cas ou
+    # l'Agent enchaine correctement de lui-meme ou reference ce fichier dans
+    # une prochaine reponse utilisateur (un nouveau run_id, donc hors
+    # perimetre de la redirection automatique).
     summary_text = (
-        f"{result['summary']}\nNouveau fichier : {result['newFileName']} (id: {result['newFileId']}) (sera joint "
-        f"automatiquement a la reponse). Pour continuer a modifier CE resultat (une autre operation sur le meme "
-        f"fichier), utilise fileId=\"{result['newFileId']}\" dans le prochain appel -- pas l'id du fichier "
+        f"{result['summary']}{chain_note}\nNouveau fichier : {result['newFileName']} (id: {result['newFileId']}) "
+        f"(sera joint automatiquement a la reponse). Pour continuer a modifier CE resultat (une autre operation sur "
+        f"le meme fichier), utilise fileId=\"{result['newFileId']}\" dans le prochain appel -- pas l'id du fichier "
         f"d'origine.\n\nApercu (feuille '{result['sheet']}') :\n{result['previewMarkdownTable']}"
     )
     return {"content": [{"type": "text", "text": summary_text}], "isError": False}
