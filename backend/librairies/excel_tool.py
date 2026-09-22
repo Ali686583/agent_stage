@@ -257,7 +257,14 @@ def _apply_op_filter_rows(sheet, op: dict) -> str:
     feuille plutot que de supprimer les lignes non correspondantes de la
     feuille source."""
     range_ref = str(op.get("range") or "")
-    column = int(op.get("column") or 1)
+    # Bug trouve en test E2E reel : le champ 'column' etait partage avec
+    # delete_column (une LETTRE, type string) alors que filter_rows a
+    # besoin d'un NOMBRE -- le schema JSON exposait "column" comme
+    # string uniquement, donc le modele envoyant legitimement un entier
+    # pour filter_rows se faisait rejeter par la validation LangChain
+    # ("Expected string, received number") avant meme d'atteindre ce
+    # code. Champ renomme en 'columnIndex', distinct de 'column'.
+    column = int(op.get("columnIndex") or 1)
     operator = str(op.get("operator") or "eq")
     value = op.get("value")
     has_header = bool(op.get("hasHeader", True))

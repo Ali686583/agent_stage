@@ -112,7 +112,7 @@ _EDIT_EXCEL_TOOL = {
         "  write_formula: requires formula, and either cell or range\n"
         "  copy_range: requires sourceRange, destCell\n"
         "  sort_range: requires range, keyColumn (optional: ascending, hasHeader)\n"
-        "  filter_rows: requires range, column, operator, value (optional: hasHeader)\n"
+        "  filter_rows: requires range, columnIndex, operator, value (optional: hasHeader)\n"
         "  clear_range: requires range\n"
         "'formula' values may use the literal placeholder {row} for the current row number, e.g. \"=B{row}-C{row}\"."
     ),
@@ -141,7 +141,8 @@ _EDIT_EXCEL_TOOL = {
                     "header": {"type": "string", "description": "New column's header text. Required for add_column."},
                     "formula": {"type": "string", "description": "Excel formula string, may use the placeholder {row}, e.g. '=B{row}-C{row}'. Required for write_formula ; optional for add_column (a computed column without a formula just gets the header)."},
                     "startRow": {"type": "integer", "description": "First data row to compute for add_column. Optional, defaults to 2 (row 1 is assumed to be the header row)."},
-                    "column": {"type": "string", "description": "For delete_column: the column LETTER to delete (e.g. 'C'). For filter_rows: the 1-based column NUMBER within 'range' to filter on (e.g. 2, never a letter)."},
+                    "column": {"type": "string", "description": "Column LETTER to delete (e.g. 'C'). Required for delete_column. Not used by filter_rows -- see 'columnIndex' for that."},
+                    "columnIndex": {"type": "integer", "description": "1-based column NUMBER within 'range' to filter on (e.g. 2). Required for filter_rows. This is a number, never a letter."},
                     "atRow": {"type": "integer", "description": "Row index to insert the new row at, for add_row. Optional -- appends at the end if omitted."},
                     "row": {"type": "integer", "description": "Row index. Required for delete_row."},
                     "name": {"type": "string", "description": "Sheet name. Required for add_sheet (the new sheet's name) and delete_sheet (the sheet to delete)."},
