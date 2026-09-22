@@ -44,9 +44,50 @@ import time
 
 import requests
 
-from librairies.database import _db, pgvector_available
+from librairies.database import _db
 from librairies.security import sign_file_token
 from librairies.workspace import new_id
+
+# Bug trouve en test E2E reel : le web (gunicorn, server.py::database.init_db)
+# et le worker RQ (qui n'appelle JAMAIS init_db -- rien dans rag_jobs.py ne le
+# fait) peuvent avoir des vues DIFFERENTES de pgvector_available() -- le
+# worker la voit toujours comme indisponible (son process ne sonde jamais),
+# alors que le web peut la voir comme disponible. Or document_chunks est
+# cree UNE SEULE FOIS (CREATE TABLE IF NOT EXISTS) avec un type de colonne
+# fige a ce moment-la : si le process qui ingere (worker, toujours "False")
+# et celui qui recupere (web, potentiellement "True") desaccordent, on
+# obtient une erreur Postgres "operateur incompatible" (<=> n'existe que
+# pour le type vector). Plutot que de faire confiance a un indicateur par
+# PROCESS qui peut diverger du SCHEMA reellement persiste, on interroge la
+# verite du schema une fois et on la met en cache -- utilise par
+# ingest_document ET search_documents, jamais l'un sans l'autre.
+_embedding_is_vector_cache: bool | None = None
+
+
+def _embedding_column_is_vector() -> bool:
+    global _embedding_is_vector_cache
+    if _embedding_is_vector_cache is not None:
+        return _embedding_is_vector_cache
+    with _db() as conn:
+        row = conn.execute(
+            """SELECT data_type, udt_name FROM information_schema.columns
+               WHERE table_name = 'document_chunks' AND column_name = 'embedding'"""
+        ).fetchone()
+    _embedding_is_vector_cache = bool(row) and row["udt_name"] == "vector"
+    return _embedding_is_vector_cache
+
+
+def _ensure_vector_adapter(conn) -> None:
+    """database._db() n'enregistre l'adaptateur pgvector (register_vector)
+    que si LE PROCESS COURANT pense pgvector disponible (_PGVECTOR_AVAILABLE,
+    jamais mis a jour dans le worker RQ -- voir commentaire plus haut). Ici
+    on se base sur la verite du schema (_embedding_column_is_vector), donc
+    on doit re-garantir l'adaptateur nous-memes sur CETTE connexion,
+    independamment de ce que _db() a deja fait ou non. register_vector est
+    sans effet indesirable a rappeler plusieurs fois sur la meme connexion."""
+    from pgvector.psycopg import register_vector
+
+    register_vector(conn)
 
 _logger = logging.getLogger(__name__)
 
@@ -353,8 +394,10 @@ def ingest_document(document_id: str) -> None:
         _mark_status(document_id, "FAILED", f"erreur technique lors de l'indexation ({str(exc)[:200]})")
         return
 
-    use_pgvector = pgvector_available()
+    use_pgvector = _embedding_column_is_vector()
     with _db() as conn:
+        if use_pgvector:
+            _ensure_vector_adapter(conn)
         # Reindexation (mission §4f) : jamais un melange ancien/nouveau
         # index -- on jette les anciens chunks avant d'inserer les nouveaux,
         # dans la MEME transaction que le passage a READY plus bas.
@@ -417,9 +460,10 @@ def search_documents(query: str, user_id: str, top_k: int = 6) -> list[dict]:
         _logger.warning("search_documents: embedding de la requete impossible", exc_info=True)
         return []
 
-    use_pgvector = pgvector_available()
+    use_pgvector = _embedding_column_is_vector()
     with _db() as conn:
         if use_pgvector:
+            _ensure_vector_adapter(conn)
             rows = conn.execute(
                 f"""SELECT dc.content, d.name AS document_name, d.id AS document_id,
                            dc.embedding <=> %(query_embedding)s AS distance
