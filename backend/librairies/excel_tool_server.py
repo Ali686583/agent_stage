@@ -179,9 +179,20 @@ def _run_edit(session_id: str, arguments: dict) -> dict:
         return {"content": [{"type": "text", "text": f"edit_excel failed (unexpected error): {str(exc)[:200]}"}], "isError": True}
 
     push_pending_file(context["runId"], result["newFileId"])
+    # Indice de chainage (bug observe en test E2E reel) : sans ceci, un Agent
+    # a qui on demande plusieurs modifications successives ne sait pas
+    # comment continuer sur SON PROPRE resultat precedent -- chaque appel
+    # part du fileId d'origine, ce qui produit plusieurs fichiers isoles
+    # incoherents entre eux (constate : set_cell puis add_row appeles
+    # separement sur le fichier ORIGINAL, jamais l'un sur le resultat de
+    # l'autre). Le nouveau fileId est donc explicitement donne en retour
+    # pour que l'Agent puisse l'utiliser comme fileId du prochain appel s'il
+    # doit encore modifier ce fichier.
     summary_text = (
-        f"{result['summary']}\nNouveau fichier : {result['newFileName']} (sera joint automatiquement a la reponse).\n\n"
-        f"Apercu (feuille '{result['sheet']}') :\n{result['previewMarkdownTable']}"
+        f"{result['summary']}\nNouveau fichier : {result['newFileName']} (id: {result['newFileId']}) (sera joint "
+        f"automatiquement a la reponse). Pour continuer a modifier CE resultat (une autre operation sur le meme "
+        f"fichier), utilise fileId=\"{result['newFileId']}\" dans le prochain appel -- pas l'id du fichier "
+        f"d'origine.\n\nApercu (feuille '{result['sheet']}') :\n{result['previewMarkdownTable']}"
     )
     return {"content": [{"type": "text", "text": summary_text}], "isError": False}
 
