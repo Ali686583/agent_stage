@@ -97,7 +97,25 @@ _EDIT_EXCEL_TOOL = {
         "context). This NEVER overwrites the original file -- it always produces a new file, which the user "
         "will see as a downloadable attachment automatically. Include the operation's summary and the "
         "returned preview table in your reply ; never claim a modification succeeded if this tool returned "
-        "isError: true."
+        "isError: true.\n\n"
+        "The 'operation' argument is a JSON object whose 'type' field selects one of the following shapes "
+        "(EXACT field names below, all fields other than 'type' are required unless marked optional -- pick "
+        "exactly one shape and include ONLY its fields, never mix fields from different shapes):\n"
+        '  {"type": "set_cell", "cell": "B2", "value": 42}\n'
+        '  {"type": "set_range", "range": "A1:B2", "values": [[1,2],[3,4]]}\n'
+        '  {"type": "add_column", "header": "Marge", "formula": "=B{row}-C{row}", "startRow": 2 (optional, default 2)}\n'
+        '  {"type": "delete_column", "column": "C"}\n'
+        '  {"type": "add_row", "values": ["Widget D", 80, 40], "atRow": 5 (optional, appends if omitted)}\n'
+        '  {"type": "delete_row", "row": 5}\n'
+        '  {"type": "add_sheet", "name": "Nouvelle feuille"}\n'
+        '  {"type": "rename_sheet", "oldName": "Sheet1", "newName": "Ventes"}\n'
+        '  {"type": "delete_sheet", "name": "Ventes"}\n'
+        '  {"type": "write_formula", "cell": "D2", "formula": "=B2-C2"} (or "range" instead of "cell" for multiple rows)\n'
+        '  {"type": "copy_range", "sourceRange": "A1:B3", "destCell": "D1"}\n'
+        '  {"type": "sort_range", "range": "A1:C10", "keyColumn": 2, "ascending": true (optional, default true), "hasHeader": true (optional, default true)}\n'
+        '  {"type": "filter_rows", "range": "A1:C10", "column": 2, "operator": "gt", "value": 100, "hasHeader": true (optional, default true)} -- operator is one of eq|contains|gt|lt\n'
+        '  {"type": "clear_range", "range": "A1:B2"}\n'
+        "'formula' values may use the literal placeholder {row} for the current row number, e.g. \"=B{row}-C{row}\"."
     ),
     "inputSchema": {
         "type": "object",
@@ -106,14 +124,7 @@ _EDIT_EXCEL_TOOL = {
             "sheetName": {"type": "string", "description": "Target sheet name. Omit to use the active/first sheet."},
             "operation": {
                 "type": "object",
-                "description": (
-                    "One of: set_cell{cell,value}, set_range{range,values}, add_column{header,formula?,startRow?}, "
-                    "delete_column{column}, add_row{values,atRow?}, delete_row{row}, add_sheet{name}, "
-                    "rename_sheet{oldName,newName}, delete_sheet{name}, write_formula{cell|range,formula}, "
-                    "copy_range{sourceRange,destCell}, sort_range{range,keyColumn,ascending?,hasHeader?}, "
-                    "filter_rows{range,column,operator(eq|contains|gt|lt),value,hasHeader?}, clear_range{range}. "
-                    "'formula'/'formula' templates may use {row} as a placeholder for the current row number."
-                ),
+                "description": "See the tool description above for the exact shape per operation type.",
                 "properties": {"type": {"type": "string"}},
                 "required": ["type"],
             },
